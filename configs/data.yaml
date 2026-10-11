@@ -1,0 +1,15 @@
+# Fallback dataset config for a hand-built tree. It is only used when
+# configs/data.prepared.yaml does not exist yet (run prepare_dataset.py for that one).
+#
+# NOTE ON 'path': Ultralytics resolves a RELATIVE path here against its global
+# datasets_dir setting, NOT against this file's location. If the trainer reports
+# "Dataset not found", that silence is why. Absolute paths sidestep it entirely —
+# which is exactly what prepare_dataset.py writes for you.
+path: ../dataset/prepared
+
+train: images/train
+val: images/val
+
+names:
+  0: Spot
+  1: Hole

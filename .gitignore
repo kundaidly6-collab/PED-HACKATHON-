@@ -1,0 +1,26 @@
+# NOTE: in .gitignore a '#' only starts a comment at the START of a line.
+# A trailing "# comment" becomes part of the pattern and silently never matches.
+# (Learned the hard way: `runs/  # stuff` matched nothing and staged 5 MB of weights.)
+
+# Generated / machine-specific — regenerate with the scripts, never commit.
+dataset/raw/
+dataset/prepared/
+dataset/_synthetic_demo/
+configs/data.prepared.yaml
+runs/
+*.pt
+*.pth
+
+# Environments
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

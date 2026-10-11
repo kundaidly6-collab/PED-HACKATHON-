@@ -1,0 +1,27 @@
+# AUDIT + DATA PREP ONLY (works without a GPU, installs in ~30 s)
+numpy
+pillow
+pyyaml
+
+# TRAINING / INFERENCE
+# ultralytics pulls torch, torchvision, matplotlib and opencv-python with it.
+ultralytics
+
+# IMPORTANT, headless machines (Colab, Kaggle, any cloud VM, this sandbox):
+# ultralytics depends on opencv-python (the GUI build), which imports libGL.so.1 and
+# crashes with "ImportError: libGL.so.1: cannot open shared object file". Install the
+# headless build instead of installing libGL:
+#     pip install opencv-python-headless
+# and if both end up present, remove the GUI one — it shadows the headless package:
+#     pip uninstall -y opencv-python
+opencv-python-headless
+
+# Optional: only if you want to compare your mAP@45 against pycocotools.
+# scripts/map45.py reimplements AP itself and needs nothing extra.
+# pycocotools
+
+# GPU NOTE: `pip install ultralytics` does NOT guarantee GPU support. The torch wheel
+# it resolves may be CPU-only or built for a different CUDA version than your driver.
+# Check first, then install the matching torch from https://pytorch.org/get-started:
+#     python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# Expect True. If it prints False on a GPU box, reinstall torch for your CUDA version.
