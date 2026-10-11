@@ -138,7 +138,7 @@ def detect(img: np.ndarray, gray: np.ndarray, verbose: bool = False) -> tuple[li
         if median_r > 0 and len(circles) >= 4 and (r > 2.2 * median_r or r < 0.45 * median_r):
             outliers += 1
             note = (f"SIZE OUTLIER vs the other {len(circles)} circles (median dia "
-                    f"{2 * median_r:.0f}px, this one {2 * r:.0f}px) — likely spurious, check first")
+                    f"{2 * median_r:.0f}px, this one {2 * r:.0f}px) — spurious? check this box first")
             conf = "low"
         elif z == "perimeter":
             note, conf = "mounting hole in the flange band", "high"
@@ -283,6 +283,8 @@ def main() -> int:
                 col = (255, 200, 0) if b["cls"] == 1 else (60, 60, 255)    # Hole cyan, Spot red
                 if b["confidence"] == "ambiguous":
                     col = (255, 0, 255)                                    # magenta = your call
+                if b["confidence"] == "low":
+                    col = (0, 140, 255)    # orange = suspect size, drawn last so it stands out
                 x1 = int(ox + (b["cx"] - b["w"] / 2) * s); y1 = int(oy + (b["cy"] - b["h"] / 2) * s)
                 x2 = int(ox + (b["cx"] + b["w"] / 2) * s); y2 = int(oy + (b["cy"] + b["h"] / 2) * s)
                 cv2.rectangle(sheet, (x1, y1), (x2, y2), col, 2)
@@ -291,7 +293,8 @@ def main() -> int:
         sp = Path(args.sheet); sp.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(sp), sheet)
         print(f"\nreview sheet: {sp}")
-        print("  cyan = Hole proposal · red = Spot proposal · magenta = YOU DECIDE (round feature in panel)")
+        print("  cyan = Hole proposal · red = Spot proposal · magenta = YOU DECIDE "
+              "(round feature in panel) · orange = suspect size, verify first")
 
     # Always drop the notes next to the drafts. The UI looks for <drafts>/notes.json by
     # default, and forgetting to pass --json previously meant every "you decide" flag
