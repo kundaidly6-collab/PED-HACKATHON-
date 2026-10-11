@@ -27,7 +27,8 @@ python scripts/prepare_dataset.py                  #    build dataset/prepared +
 python scripts/validate_labels.py                  # 3. label gate + contact sheet you must look at
 python scripts/train.py --dry-run                  # 4. the config chosen for THIS machine
 python scripts/train.py                            #    train
-python scripts/evaluate.py --name ped_baseline      # 5. Ultralytics metrics + the real mAP@45
+python scripts/select_best.py --run ped_baseline    # 5. pick the checkpoint by mAP@45, not by mAP@50:95
+python scripts/evaluate.py --name ped_baseline      #    Ultralytics metrics + the real mAP@45
 python scripts/submit.py --weights runs/ped_baseline/weights/best.pt --source <test dir> --format <?>
 ```
 
@@ -50,7 +51,7 @@ python scripts/prepare_dataset.py --raw dataset/_synthetic_demo/raw --out datase
 | 4 | leakage-safe train/val split | `prepare_dataset.py` | done — grouped by component, stratified, seeded |
 | 5 | train the baseline | `train.py` | done — config derived from the audit, recorded per run |
 | 6 | inspect predictions / per-class errors | `map45.py`, `evaluate.py` | done — per-class AP, worst-image list, confusion matrix |
-| 7 | evaluate with the official mAP@45 | `map45.py` | done — own COCO-style implementation + unit tests (`selftest.py`) |
+| 7 | evaluate with the official mAP@45 | `map45.py`, `select_best.py` | done — own COCO-style implementation + unit tests (`selftest.py`); checkpoint selection corrected |
 | 8 | test the submission format | `submit.py` | done — 5 formats, coordinates in original pixels |
 
 Verified end-to-end on generated data in this sandbox (no GPU, 2 CPU cores, 31 train images,
@@ -87,6 +88,19 @@ mAP         0.7400     69   ...
 The per-class split is the useful part: with `Spot` far above `Hole`, your score is gated
 by the minority class, and no amount of extra epochs on the majority class will fix it.
 
+**Full explanation of the metric, how the IoU threshold changes what counts as correct,
+and why mAP@45 is an evaluation metric rather than a training objective:
+[`docs/metric_guide.md`](docs/metric_guide.md).**
+
+### One trap worth knowing up front
+
+Ultralytics chooses `best.pt` — and decides when to stop early — using
+`mAP@50:95`, not your competition metric (verified in
+`ultralytics/models/yolo/detect/val.py`). On a small dataset those rankings disagree.
+`select_best.py` re-scores every saved checkpoint on mAP@45; in a 24-epoch test run the
+gap between checkpoints was `0.1073` vs `0.2198`, i.e. **11 points of score** depending
+on which file you submit.
+
 ---
 
 ## Pipeline
@@ -98,6 +112,7 @@ by the minority class, and no amount of extra epochs on the majority class will 
 | `validate_labels.py` | per-image/per-class gate on the *built* dataset + contact sheet with boxes drawn | missing/orphan/duplicate labels, degenerate boxes, manifest disagreement |
 | `train.py` | hardware-adaptive training, records `config.json` per run | no data, no GPU (unless `--allow-cpu`/`--smoke`) |
 | `map45.py` | the scored metric + confidence sweep + worst-image report | missing GT, unreadable predictions |
+| `select_best.py` | scores every saved checkpoint on mAP@45 and copies the winner | refuses to name a winner from noise or from an untrained run |
 | `evaluate.py` | Ultralytics val for PR curves/confusion matrix, then calls `map45.py` | missing weights |
 | `predict.py` | inference, optional `--tile` for tiny targets on large frames | unreadable images |
 | `submit.py` | yolo / kaggle / coco / csv / xml output in **original image pixels** | — |

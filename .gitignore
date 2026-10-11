@@ -3,9 +3,13 @@
 # (Learned the hard way: `runs/  # stuff` matched nothing and staged 5 MB of weights.)
 
 # Generated / machine-specific — regenerate with the scripts, never commit.
-dataset/raw/
-dataset/prepared/
-dataset/_synthetic_demo/
+# Ignore the WHOLE dataset tree. Listing individual subfolders (raw/, prepared/,
+# _synthetic_demo/) silently stopped working the moment a test folder with another
+# name appeared, and 230 generated files got committed. Negative patterns are
+# brittle; one rule that cannot be outgrown is better.
+dataset/
+*.npy
+*.cache
 configs/data.prepared.yaml
 runs/
 *.pt
