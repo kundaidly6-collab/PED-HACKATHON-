@@ -349,6 +349,70 @@ def test_annotation_stack() -> None:
           annotate.CLASS_NAMES == {0: "Spot", 1: "Hole"}, f"got {annotate.CLASS_NAMES}")
 
 
+# --------------------------------------------------------------- submission class mapping
+
+def test_submission_class_mapping() -> None:
+    """The rules fix the class NAMES and never publish a numeric order.
+
+    So a submission can only be wrong in two ways: the ids are in an order the grader
+    disagrees with, or - worse - the ids and the names beside them come from different
+    orderings. The second is a self-contradicting file, and it is the bug this test was
+    written after finding. The invariant: whatever the id, the box on the left is a Hole
+    and the box on the right is a Spot.
+    """
+    print("\n= submission: class ids and names cannot disagree =")
+    import annotate  # noqa: F401  (kept for symmetry with the other test)
+    import submit
+
+    sizes = {"frame01": (600, 400)}
+    # internal ids: 0=Spot, 1=Hole. Left box is the Hole, right box is the Spot.
+    boxes = {"frame01": [(120.0, 170.0, 180.0, 230.0, 0.91234, 1),
+                         (420.0, 170.0, 480.0, 230.0, 0.80000, 0)]}
+
+    for order in ("spot-first", "hole-first"):
+        pairs, ids = submit.class_map(order)
+        legend = dict(pairs)
+        check(f"[{order}] the legend names exactly the two classes",
+              sorted(legend.values()) == ["Hole", "Spot"], f"got {legend}")
+        check(f"[{order}] ids are {len(pairs)} distinct values 0..{len(pairs) - 1}",
+              sorted(legend) == list(range(len(pairs))), f"got {sorted(legend)}")
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            # csv: carries both id and name in the same row, so they must agree
+            submit.write_csv(boxes, sizes, td / "s.csv", [n for _i, n in pairs], ids)
+            rows = [r.split(",") for r in (td / "s.csv").read_text().strip().splitlines()[1:]]
+            left = next(r for r in rows if abs(float(r[4]) - 120.0) < 1.0)
+            right = next(r for r in rows if abs(float(r[4]) - 420.0) < 1.0)
+            check(f"[{order}] csv: the ids beside each name match the legend",
+                  legend[int(left[1])] == left[2] and legend[int(right[1])] == right[2],
+                  f"left={left[1]}:{left[2]} right={right[1]}:{right[2]} legend={legend}")
+            check(f"[{order}] csv keeps Hole on the left and Spot on the right",
+                  left[2] == "Hole" and right[2] == "Spot",
+                  f"got {left[2]}/{right[2]}")
+
+            # yolo: ids only, so the legend file is the only decoder
+            submit.write_yolo(boxes, sizes, td / "y", [n for _i, n in pairs], ids)
+            (td / "y" / "classes.txt").write_text("\n".join(n for _i, n in pairs) + "\n")
+            names = (td / "y" / "classes.txt").read_text().split()
+            lines = [l.split() for l in (td / "y" / "frame01.txt").read_text().splitlines()]
+            left = next(l for l in lines if abs(float(l[1]) - 0.25) < 1e-6)
+            right = next(l for l in lines if abs(float(l[1]) - 0.75) < 1e-6)
+            check(f"[{order}] yolo: classes.txt decodes the ids back to Hole/Spot",
+                  names[int(left[0])] == "Hole" and names[int(right[0])] == "Spot",
+                  f"got {names[int(left[0])]}/{names[int(right[0])]}")
+
+            # coco: category ids are 1-based and the categories list must agree with them
+            submit.write_coco(boxes, sizes, td / "i.json", [n for _i, n in pairs], ids)
+            doc = json.loads((td / "i.json").read_text())
+            cats = {c["id"]: c["name"] for c in doc["categories"]}
+            check(f"[{order}] coco: every category_id resolves, and only the valid two exist",
+                  sorted(cats.values()) == ["Hole", "Spot"] and len(cats) == 2, f"got {cats}")
+            by_x = {round(a["bbox"][0]): cats[a["category_id"]] for a in doc["annotations"]}
+            check(f"[{order}] coco keeps Hole on the left and Spot on the right",
+                  by_x == {120: "Hole", 420: "Spot"}, f"got {by_x}")
+
+
 # --------------------------------------------------------------- roundtrip
 
 def test_roundtrip() -> None:
@@ -538,6 +602,7 @@ def main() -> int:
     test_split()
     test_roundtrip()
     test_annotation_stack()
+    test_submission_class_mapping()
     test_end_to_end_build()
     test_dataset_config_resolution()
     test_kaggle_reference_parsing()

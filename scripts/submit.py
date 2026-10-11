@@ -57,13 +57,28 @@ def read_boxes(label_dir: Path, sizes: dict[str, tuple[int, int]]) -> dict[str, 
     return out
 
 
-def write_yolo(boxes, sizes, out: Path) -> Path:
+def class_map(order: str) -> tuple[list[tuple[int, str]], dict[int, int]]:
+    """(id, name) pairs in output order, plus internal-id -> output-id.
+
+    Internal ids are this repo's training convention (0=Spot, 1=Hole). The submission's
+    ids are a separate choice. Keeping them in one function means a row can never show a
+    flipped id beside a name that came from the other ordering.
+    """
+    names = list(CLASS_NAMES) if order == "spot-first" else list(reversed(CLASS_NAMES))
+    pairs = list(enumerate(names))
+    ids = {i: i for i in range(len(CLASS_NAMES))} if order == "spot-first" \
+        else {i: len(CLASS_NAMES) - 1 - i for i in range(len(CLASS_NAMES))}
+    return pairs, ids
+
+
+def write_yolo(boxes, sizes, out: Path, names: list[str] | None = None,
+         ids: dict[int, int] | None = None) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     n = 0
     for stem, rows in boxes.items():
         w, h = sizes[stem]
         lines = [
-            f"{cls} {(x1 + x2) / 2 / w:.6f} {(y1 + y2) / 2 / h:.6f} {(x2 - x1) / w:.6f} {(y2 - y1) / h:.6f} {conf:.5f}"
+            f"{ids[cls]} {(x1 + x2) / 2 / w:.6f} {(y1 + y2) / 2 / h:.6f} {(x2 - x1) / w:.6f} {(y2 - y1) / h:.6f} {conf:.5f}"
             for x1, y1, x2, y2, conf, cls in sorted(rows, key=lambda r: -r[4])
         ]
         n += len(lines)
@@ -72,7 +87,9 @@ def write_yolo(boxes, sizes, out: Path) -> Path:
     return out
 
 
-def write_kaggle(boxes, sizes, out: Path) -> Path:
+def write_kaggle(boxes, sizes, out: Path, names: list[str] | None = None,
+         ids: dict[int, int] | None = None) -> Path:
+    ids = ids or {i: i for i in range(len(CLASS_NAMES))}
     out.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with out.open("w", newline="", encoding="utf-8") as fh:
@@ -81,13 +98,16 @@ def write_kaggle(boxes, sizes, out: Path) -> Path:
         for stem, rows in boxes.items():
             w, h = sizes[stem]
             for x1, y1, x2, y2, conf, cls in sorted(rows, key=lambda r: -r[4]):
-                wcsv.writerow([f"{stem}.jpg", cls, f"{conf:.5f}", f"{x1:.2f}", f"{y1:.2f}", f"{x2:.2f}", f"{y2:.2f}", w, h])
+                wcsv.writerow([f"{stem}.jpg", ids[cls], f"{conf:.5f}", f"{x1:.2f}", f"{y1:.2f}", f"{x2:.2f}", f"{y2:.2f}", w, h])
                 n += 1
     print(f"  wrote {n} rows to {out}")
     return out
 
 
-def write_csv(boxes, sizes, out: Path) -> Path:
+def write_csv(boxes, sizes, out: Path, names: list[str] | None = None,
+         ids: dict[int, int] | None = None) -> Path:
+    names = names or list(CLASS_NAMES)
+    ids = ids or {i: i for i in range(len(CLASS_NAMES))}
     out.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with out.open("w", newline="", encoding="utf-8") as fh:
@@ -95,13 +115,14 @@ def write_csv(boxes, sizes, out: Path) -> Path:
         wcsv.writerow(["image", "class_id", "class_name", "confidence", "xmin", "ymin", "xmax", "ymax"])
         for stem, rows in boxes.items():
             for x1, y1, x2, y2, conf, cls in sorted(rows, key=lambda r: -r[4]):
-                wcsv.writerow([f"{stem}.jpg", cls, CLASS_NAMES[cls], f"{conf:.5f}", f"{x1:.2f}", f"{y1:.2f}", f"{x2:.2f}", f"{y2:.2f}"])
+                wcsv.writerow([f"{stem}.jpg", ids[cls], names[ids[cls]], f"{conf:.5f}", f"{x1:.2f}", f"{y1:.2f}", f"{x2:.2f}", f"{y2:.2f}"])
                 n += 1
     print(f"  wrote {n} rows to {out}")
     return out
 
 
-def write_coco(boxes, sizes, out: Path) -> Path:
+def write_coco(boxes, sizes, out: Path, names: list[str] | None = None,
+         ids: dict[int, int] | None = None) -> Path:
     import datetime
 
     images, anns, next_id = [], [], 1
@@ -113,7 +134,7 @@ def write_coco(boxes, sizes, out: Path) -> Path:
                 {
                     "id": next_id,
                     "image_id": i,
-                    "category_id": cls + 1,  # COCO ids are 1-based
+                    "category_id": ids[cls] + 1,  # COCO ids are 1-based
                     "bbox": [round(x1, 2), round(y1, 2), round(x2 - x1, 2), round(y2 - y1, 2)],
                     "area": round((x2 - x1) * (y2 - y1), 2),
                     "iscrowd": 0,
@@ -126,7 +147,8 @@ def write_coco(boxes, sizes, out: Path) -> Path:
         "licenses": [],
         "images": images,
         "annotations": anns,
-        "categories": [{"id": i + 1, "name": n, "supercategory": "ped"} for i, n in enumerate(CLASS_NAMES)],
+        "categories": [{"id": ids[c] + 1, "name": names[ids[c]], "supercategory": "ped"}
+                           for c in range(len(CLASS_NAMES))],
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc), encoding="utf-8")
@@ -134,14 +156,15 @@ def write_coco(boxes, sizes, out: Path) -> Path:
     return out
 
 
-def write_voc(boxes, sizes, out: Path) -> Path:
+def write_voc(boxes, sizes, out: Path, names: list[str] | None = None,
+         ids: dict[int, int] | None = None) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     for stem, rows in boxes.items():
         w, h = sizes[stem]
         lines = [f"<annotation><filename>{stem}.jpg</filename>", f"<size><width>{w}</width><height>{h}</height><depth>3</depth></size>"]
         for x1, y1, x2, y2, conf, cls in rows:
             lines.append(
-                f"<object><name>{CLASS_NAMES[cls]}</name><confidence>{conf:.5f}</confidence>"
+                f"<object><name>{names[ids[cls]]}</name><confidence>{conf:.5f}</confidence>"
                 f"<bndbox><xmin>{x1:.0f}</xmin><ymin>{y1:.0f}</ymin><xmax>{x2:.0f}</xmax><ymax>{y2:.0f}</ymax></bndbox></object>"
             )
         lines.append("</annotation>")
@@ -166,6 +189,11 @@ def main() -> int:
     ap.add_argument("--tile", type=int, default=0, help="tiled inference for large images (see predict.py)")
     ap.add_argument("--device", default=None)
     ap.add_argument("--agnostic-nms", action="store_true", help="suppress across classes (only if the organizers do)")
+    ap.add_argument("--class-order", default="spot-first", choices=["spot-first", "hole-first"],
+                    help="numeric id order in the OUTPUT. The competition rules fix the class NAMES "
+                         "but never publish a numeric order, so if their reader assumes the other "
+                         "mapping this is the one flag that fixes it (default: spot-first, this repo's "
+                         "convention everywhere else)")
     args = ap.parse_args()
 
     from PIL import Image
@@ -245,19 +273,42 @@ def main() -> int:
 
     out = Path(args.out) if args.out else ROOT / "runs" / f"submission_{args.format}"
     n_boxes = sum(len(v) for v in boxes.values())
+
+    # The rules fix the class NAMES and never state a numeric order. If the organizers'
+    # reader disagrees with ours, every box is misclassified and the score collapses, so
+    # the order is an explicit, printed choice rather than a silent assumption.
+    pairs, ids = class_map(args.class_order)
+    out_names = [n for _i, n in pairs]
+
     print(f"\n=== writing submission ({args.format}) ===")
     print(f"  images: {len(boxes)}   boxes: {n_boxes}   conf>={args.conf}")
+    print(f"  class ids : " + ", ".join(f"{i}={n}" for i, n in pairs)
+          + ("   [--class-order hole-first, NOT this repo's training ids]" if args.class_order == "hole-first" else ""))
     print(f"  coordinates converted back to each image's own pixel size (not the letterboxed {args.imgsz}²)")
     if args.format == "yolo":
-        target = write_yolo(boxes, sizes, out)
+        target = write_yolo(boxes, sizes, out, out_names, ids)
+        # YOLO's own convention for decoding bare integer ids. Without it the output is
+        # unreadable-by-construction and the class order is anyone's guess.
+        print(f"  legend    : {Path(target) / 'classes.txt'} (ids, in order)")
     elif args.format == "kaggle":
-        target = write_kaggle(boxes, sizes, out if out.suffix else out / "submission.csv")
+        target = write_kaggle(boxes, sizes, out if out.suffix else out / "submission.csv", out_names, ids)
     elif args.format == "csv":
-        target = write_csv(boxes, sizes, out if out.suffix else out / "submission.csv")
+        target = write_csv(boxes, sizes, out if out.suffix else out / "submission.csv", out_names, ids)
     elif args.format == "coco":
-        target = write_coco(boxes, sizes, out if out.suffix else out / "instances.json")
+        target = write_coco(boxes, sizes, out if out.suffix else out / "instances.json", out_names, ids)
     else:
-        target = write_voc(boxes, sizes, out)
+        target = write_voc(boxes, sizes, out, out_names, ids)
+
+    # The yolo and kaggle schemas carry ids only, with no room for a name. A legend
+    # written from a DIFFERENT source than the ids is worse than none: built once, from
+    # the same pairs that are printed above, it is the record of what was submitted.
+    if args.format == "yolo":
+        # YOLO's convention: one class name per line, id = line number, no keys.
+        (Path(target) / "classes.txt").write_text("\n".join(out_names) + "\n", encoding="utf-8")
+    elif args.format == "kaggle":
+        # id-only schema, so the mapping travels beside it
+        (Path(target).parent / "submission_classes.txt").write_text(
+            "\n".join(f"{i}={n}" for i, n in pairs) + "\n", encoding="utf-8")
 
     if args.weights:
         wp = Path(args.weights)
@@ -265,6 +316,8 @@ def main() -> int:
             print(f"  weights: {wp} ({wp.stat().st_size / 1024 / 1024:.1f} MiB) — check the competition's size cap")
     print(f"\nOUTPUT: {target}")
     print("\nBefore submitting, confirm against the organizers' example:")
+    print(f"  · the class order above is what their reader expects ({', '.join(out_names)})")
+    print("    — they publish names, not numbers, so this is the one thing worth asking about")
     print("  · column order / key names / class-id base (0 vs 1)")
     print("  · whether confidence is required, and the accepted range")
     print("  · whether coordinates are pixels or normalized, absolute or top-left")

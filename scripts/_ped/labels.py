@@ -17,6 +17,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # Classes for this competition. IDs are fixed here and echoed into data.yaml.
+#
+# THE RULES FIX THE NAMES, NOT THE NUMBERS. The competition document says only:
+#     Nut              -> Hole
+#     physical opening -> Hole
+#     Bolt             -> Spot
+#     weld spot        -> Spot
+# It never states a numeric order. "Spot = 0, Hole = 1" is therefore THIS repo's
+# convention: it is consistent everywhere here (data.yaml, labels, the annotator, the
+# trainer) and is safe for training, because we generate both the labels and the config.
+#
+# It is NOT safe to assume a grader agrees. A submission that carries bare integers and
+# no names is a coin flip on the ordering, and getting it wrong misclassifies every box
+# and collapses the score. So: every submission format either carries the class NAME
+# (csv, coco, xml) or ships a classes.txt beside it (yolo), and submit.py prints the
+# mapping it used. Change the ids in exactly this one place if the organisers publish an
+# order that differs.
 CLASS_NAMES = ["Spot", "Hole"]
 CLASS_TO_ID = {name.lower(): idx for idx, name in enumerate(CLASS_NAMES)}
 

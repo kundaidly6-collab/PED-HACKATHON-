@@ -14,6 +14,14 @@ python scripts/recon_image.py path/to/real_part.png --out runs/recon/part.png
 
 ## What the component is
 
+The organizers describe the subject as an **unpainted metal frame component**; the first
+real image was a galvanised steel plate. Bare, uncoated metal is the hardest possible
+surface for the proposal heuristics below: it is close to a mirror, so a hole can read as
+a bright reflection, a reflection can read as a hole, and a single feature changes
+appearance with the camera angle. That is the reason proposals are drafts a human
+confirms rather than labels: **size and shape survive the lighting, appearance does not**,
+so the tool trusts the former and asks about the latter.
+
 A square galvanised mounting plate with a large recessed (pressed) panel, formed ribs
 inside the recess, and mounting holes around the perimeter flange. One small circular
 weld/stud feature sits inside the recess near its lower edge.

@@ -10,8 +10,36 @@ project optimises for, and the only number that decides the ranking.**
 
 | id | class | what it is |
 |----|-------|-----------|
-| 0 | `Spot` | spot-weld nugget / stud on the component |
-| 1 | `Hole` | hole through the component |
+| 0 | `Spot` | bolt, spot-weld nugget or weld feature on the component |
+| 1 | `Hole` | nut, or any physical hole / opening in the component |
+
+### The organizers' annotation rules, and what this repo does with them
+
+The rulebook maps words to classes, and the mapping is not the one your instinct
+suggests — **a nut is a `Hole`, and a bolt is a `Spot`**:
+
+| you see | you annotate |
+|---|---|
+| Nut | `Hole` |
+| physical hole / opening | `Hole` |
+| Bolt | `Spot` |
+| weld spot / spot-welding feature | `Spot` |
+
+There is **no `Punch` class** and no third class. Everything in this repo uses those two.
+
+The test-set annotations are hidden and submissions are scored automatically with
+**mAP@50**. Note what the rules do *not* say: they fix the class **names** and never
+state a numeric ordering. "`Spot`=0, `Hole`=1" is **this repo's** convention — consistent
+across `data.yaml`, the labels, the annotator and the trainer, which is all training
+needs. For a submission it is an assumption, so `submit.py` refuses to leave it implicit:
+it prints the mapping it used, emits a legend (`classes.txt` / `submission_classes.txt`)
+beside every id-only format, and can flip the order with `--class-order hole-first` if
+the organizers' reader expects the other one. Getting this wrong misclassifies every box,
+so it is the first thing worth confirming with the organizers.
+
+**Team entries** (nothing in this repo can do it for you): 2–5 members per team, at least
+one Section Head, each member joins the competition with their own Kaggle account and
+accepts the team invitation, and a participant may belong to only one team.
 
 ---
 
