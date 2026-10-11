@@ -38,25 +38,9 @@ NOISE = 0.005
 # Below this, the run has not learned anything worth submitting.
 MIN_MEANINGFUL = 0.02
 
+from _ped.dataset_cfg import resolve_split_dirs  # noqa: E402
 from _ped.labels import CLASS_NAMES  # noqa: E402
 from _ped.metrics import best_confidence, score  # noqa: E402
-
-
-def discover(data_yaml: Path, split: str = "val") -> tuple[Path, Path]:
-    """Find the (images, labels) directories for a split, via the dataset yaml."""
-    import yaml
-
-    cfg = yaml.safe_load(data_yaml.read_text(encoding="utf-8")) or {}
-    base = Path(str(cfg.get("path", "."))).expanduser()
-    if not base.is_absolute():
-        base = (data_yaml.parent / base)
-    img_rel = cfg.get(split) or f"images/{split}"
-    img_dir = (base / img_rel).resolve()
-    lbl_dir = Path(str(img_dir).replace(f"{Path(img_rel).parts[0]}", "labels", 1))
-    if not lbl_dir.is_dir():
-        alt = img_dir.parent.parent / "labels" / img_dir.name
-        lbl_dir = alt if alt.is_dir() else lbl_dir
-    return img_dir, lbl_dir
 
 
 def score_checkpoint(weights: Path, img_dir: Path, lbl_dir: Path, sizes, gt, imgsz: int,
@@ -110,9 +94,11 @@ def main() -> int:
     if not data_yaml.is_file():
         print(f"[ERROR] dataset yaml not found: {data_yaml}\n        run scripts/prepare_dataset.py first", file=sys.stderr)
         return 2
-    img_dir, lbl_dir = discover(data_yaml, args.split)
-    if not img_dir.is_dir():
-        print(f"[ERROR] {args.split} images not found at {img_dir}", file=sys.stderr)
+    img_dir, lbl_dir, notes = resolve_split_dirs(data_yaml, args.split, root_hint=ROOT)
+    for n in notes:
+        print(f"  · {n}")
+    if img_dir is None or lbl_dir is None:
+        print(f"[ERROR] could not resolve the {args.split} split from {data_yaml}", file=sys.stderr)
         return 2
 
     import map45

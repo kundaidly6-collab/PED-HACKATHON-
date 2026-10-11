@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _ped.dataset_cfg import resolve_split_dirs  # noqa: E402
 from _ped.discovery import build_layout, iter_images  # noqa: E402
 from _ped.hardware import detect_hardware, plan_training  # noqa: E402
 from _ped.labels import summarize  # noqa: E402
@@ -55,65 +56,6 @@ def resolve_data_yaml(explicit: str | None) -> Path:
     )
 
 
-def resolve_split_dirs(data_yaml: Path) -> tuple[Path | None, Path | None, list[str]]:
-    """Read the dataset YAML and find (train_images, train_labels, notes).
-
-    A relative 'path:' is ambiguous — Ultralytics resolves it against its global
-    datasets_dir, which we cannot see from here — so we try the two plausible readings
-    and say which one was used. Absolute paths (what prepare_dataset.py writes) just work.
-    """
-    import yaml as _yaml
-
-    notes: list[str] = []
-    try:
-        cfg = _yaml.safe_load(data_yaml.read_text(encoding="utf-8")) or {}
-    except Exception as exc:
-        return None, None, [f"could not parse {data_yaml}: {exc}"]
-    train_rel = cfg.get("train") or "images/train"
-    base = cfg.get("path")
-    if base is None:
-        img_dir = (data_yaml.parent / train_rel).resolve()
-        notes.append(f"no 'path:' in the yaml; assuming images/{train_rel} next to the yaml")
-    else:
-        base_p = Path(str(base)).expanduser()
-        if base_p.is_absolute():
-            img_dir = (base_p / train_rel).resolve()
-        else:
-            for cand in (data_yaml.parent / base_p, ROOT / base_p):
-                if cand.exists():
-                    img_dir = (cand / train_rel).resolve()
-                    notes.append(f"relative 'path:' resolved to {img_dir} (tried relative to the yaml first)")
-                    break
-            else:
-                img_dir = (data_yaml.parent / base_p / train_rel).resolve()
-                notes.append(
-                    f"neither {data_yaml.parent / base_p} nor {ROOT / base_p} exists — "
-                    "if the trainer also cannot find the data, rewrite 'path:' as an absolute path"
-                )
-    if not img_dir.is_dir():
-        return None, None, notes + [f"image directory does not exist: {img_dir}"]
-    # Standard ultralytics layout: <root>/images/<split> with <root>/labels/<split>.
-    # Check the plausible variants instead of assuming, because a wrong labels path
-    # silently reports "0 boxes" and then the imgsz planning is blind.
-    split = img_dir.name
-    candidates = [
-        img_dir.parent.parent / "labels" / split,   # dataset/images/train -> dataset/labels/train
-        img_dir.parent / "labels" / split,          # dataset/train/images -> dataset/train/labels
-        img_dir.parent / "labels",                  # labels/ holds the split name already
-    ]
-    if "images" in img_dir.parts:                   # replace the last 'images' component
-        parts = list(img_dir.parts)
-        for i in range(len(parts) - 1, -1, -1):
-            if parts[i] == "images":
-                parts[i] = "labels"
-                candidates.insert(0, Path(*parts))
-                break
-    lbl_dir = next((c for c in candidates if c.is_dir()), None)
-    if lbl_dir is None:
-        notes.append(f"no labels directory found near {img_dir} (tried {[str(c) for c in candidates[:3]]})")
-    return img_dir, lbl_dir, notes
-
-
 def dataset_stats(data_yaml: Path) -> tuple[object, dict]:
     """Stats for the actual training split named by *data_yaml*.
 
@@ -124,7 +66,7 @@ def dataset_stats(data_yaml: Path) -> tuple[object, dict]:
 
     from _ped.labels import DatasetStats, read_yolo_file
 
-    img_dir, lbl_dir, notes = resolve_split_dirs(data_yaml)
+    img_dir, lbl_dir, notes = resolve_split_dirs(data_yaml, "train", root_hint=ROOT)
     for n in notes:
         print(f"  · {n}")
     if img_dir is not None:

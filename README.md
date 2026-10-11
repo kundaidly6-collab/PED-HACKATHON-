@@ -1,187 +1,331 @@
-# PED Hackathon — visual inspection of Spot welds and Holes
+# PED Hackathon — Spot & Hole detection on pressed metal components
 
-Detect two classes on metal components and maximise **mAP@45**:
+**Goal: train the best possible detector for the two target classes, measured by
+mAP@45. A higher mAP@45 means better detection performance — that is the number this
+project optimises for, and the only number that decides the ranking.**
 
-| id | class  | what it is |
-|----|--------|------------|
-| 0  | `Spot` | spot weld nugget |
-| 1  | `Hole` | hole through the material |
-
-This repo is built around one idea: **the dataset and the machine decide the training
-config, not the other way round.** Run `audit_dataset.py` first; it prints the single
-next command for *your* data instead of assumptions about it.
-
-Nothing here invents labels. If the annotations are missing or malformed, the pipeline
-stops and says so — a detector trained on guessed boxes (e.g. "every dark circle is a
-Hole") scores worse than one trained on fewer, correct boxes, and you find out too late.
+| id | class | what it is |
+|----|-------|-----------|
+| 0 | `Spot` | spot-weld nugget / stud on the component |
+| 1 | `Hole` | hole through the component |
 
 ---
 
-## Quick start
+## 1. The project in one page
+
+### The problem
+
+Given photographs of pressed sheet-metal components, draw a bounding box around every
+**spot weld** and every **hole**. It is an object-detection task with a small number of
+classes but a large number of small instances per image, on shiny, low-contrast metal
+where the same physical feature can look completely different from one lighting angle to
+the next.
+
+### The metric, and why it is not just "accuracy"
+
+mAP@45 is **mean Average Precision at IoU threshold 0.45**. Reading it from the inside out:
+
+1. **IoU** (intersection over union) measures how well a predicted box overlaps the true box. `1.0` = identical, `0.0` = no overlap.
+2. A prediction counts as a **true positive** only if its IoU with an unmatched ground-truth box is **≥ 0.45**. Otherwise it is a **false positive**. Any ground-truth box never matched is a **miss**.
+3. Matching is done **highest-confidence-first** and is strictly one-to-one, so a second box on the same object is a false positive, not a second hit.
+4. **AP** for a class is the area under the precision–recall curve obtained by sweeping the confidence threshold — it summarises every possible threshold in one number.
+5. **mAP** is the mean of AP over the classes that have ground truth. Here: `(AP_Spot + AP_Hole) / 2`.
+
+So **mAP@45 rewards finding objects and penalises only genuinely sloppy boxes.** The 0.45
+is a slightly more forgiving localisation requirement than the classic 0.50, which suits
+small targets with soft edges. Because a fixed pixel error means something different at
+every object scale — 3 px of slop is harmless on a 48 px hole (IoU 0.88) and fatal on a
+10 px one (IoU 0.54) — the threshold choice materially changes what counts as correct.
+
+> **Full walkthrough, including the localisation-tolerance table and why mAP@45 is an
+> evaluation metric rather than a training objective: [`docs/metric_guide.md`](docs/metric_guide.md).**
+
+### The one distinction that matters most
+
+**You do not train *with* mAP@45.** It is not differentiable — it contains a discrete
+match/no-match decision and a sort by confidence, so there is no gradient to descend.
+Training minimises a **loss** (box regression + classification + DFL). mAP@45 is then
+*measured* on held-out images to decide:
+
+1. **which checkpoint to submit** — and Ultralytics' own `best.pt` is chosen by mAP@50:95, *not* your metric (see §5),
+2. **what confidence threshold to submit at** — chosen by a sweep, not guessed,
+3. **whether a change actually helped** — the same yardstick for every experiment.
+
+### The organising principle
+
+**The dataset and the machine decide the training configuration, not the other way round.**
+Every script measures before it acts, and refuses to continue when the inputs are not
+trustworthy — no guessed labels, no silent format conversion, no hardcoded image size.
+A detector trained on invented boxes scores worse than one trained on fewer correct
+boxes, and you find that out after the deadline. So the pipeline stops and says so instead.
+
+---
+
+## 2. Getting the data (Kaggle)
+
+The project data comes from Kaggle:
+
+```
+https://www.kaggle.com/t/95c0d96a415c52241ed6c14bb2a0b30a
+```
+
+That link is a **`/t/` task link**, which matters — see the note below.
+
+### Route A — automated download (needs credentials)
 
 ```bash
-python -m pip install -r requirements.txt          # add opencv-python-headless on any headless box
-python scripts/audit_dataset.py                    # 1. where do we stand?  ← START HERE
-python scripts/prepare_dataset.py --dry-run        # 2. what would the conversion do?
-python scripts/prepare_dataset.py                  #    build dataset/prepared + configs/data.prepared.yaml
-python scripts/validate_labels.py                  # 3. label gate + contact sheet you must look at
-python scripts/train.py --dry-run                  # 4. the config chosen for THIS machine
-python scripts/train.py                            #    train
-python scripts/select_best.py --run ped_baseline    # 5. pick the checkpoint by mAP@45, not by mAP@50:95
-python scripts/evaluate.py --name ped_baseline      #    Ultralytics metrics + the real mAP@45
-python scripts/submit.py --weights runs/ped_baseline/weights/best.pt --source <test dir> --format <?>
+pip install kagglehub                       # already in requirements.txt
+python scripts/fetch_dataset.py --check     # reports credentials + reachability, downloads nothing
+python scripts/fetch_dataset.py --url https://www.kaggle.com/t/95c0d96a415c52241ed6c14bb2a0b30a
 ```
 
-No data yet? Prove the plumbing on generated images first:
+Credentials are read from the standard locations and **never printed**:
 
-```bash
-python scripts/selftest.py                                                    # 44 known-answer checks, no data needed
-python scripts/make_synthetic_data.py --out dataset/_synthetic_demo/raw       # fake parts, looks structurally real
-python scripts/prepare_dataset.py --raw dataset/_synthetic_demo/raw --out dataset/_synthetic_demo/prepared
-```
+- `~/.kaggle/kaggle.json` — from Kaggle → *your avatar* → *Settings* → *API* → *Create New Token*
+  (Windows: `C:\Users\<you>\.kaggle\kaggle.json`; `chmod 600` it on Linux/macOS)
+- or the environment variables `KAGGLE_USERNAME` and `KAGGLE_KEY`
 
-### Status of the 9-point plan
+The script accepts any Kaggle reference form and resolves it itself:
+`/t/<id>`, `/competitions/<slug>`, `/c/<slug>`, `/datasets/<owner>/<name>`, `/d/<owner>/<name>`,
+a bare slug, or `owner/name`. It tries the API, falls back to the `kaggle` CLI, and — most
+importantly — **tells the three failure modes apart**, because they have different fixes:
 
-| # | plan item | script | state |
-|---|---|---|---|
-| 0 | put originals in `dataset/raw/` | — | your action; drop-zone is ready and gitignored |
-| 1 | install dependencies | `requirements.txt` | done, incl. the headless-opencv trap |
-| 2 | run the audit | `audit_dataset.py` | done — images, labels, GPU, imgsz, next command |
-| 3 | confirm format + class mapping | `audit_dataset.py` §4–5 | done — peeks the raw file by eye, maps COCO/VOC names explicitly |
-| 4 | leakage-safe train/val split | `prepare_dataset.py` | done — grouped by component, stratified, seeded |
-| 5 | train the baseline | `train.py` | done — config derived from the audit, recorded per run |
-| 6 | inspect predictions / per-class errors | `map45.py`, `evaluate.py` | done — per-class AP, worst-image list, confusion matrix |
-| 7 | evaluate with the official mAP@45 | `map45.py`, `select_best.py` | done — own COCO-style implementation + unit tests (`selftest.py`); checkpoint selection corrected |
-| 8 | test the submission format | `submit.py` | done — 5 formats, coordinates in original pixels |
-
-Verified end-to-end on generated data in this sandbox (no GPU, 2 CPU cores, 31 train images,
-40 epochs from scratch — see the note on the blocked weight CDN below):
-
-```
-HEADLINE mAP@45 = 0.4271     Ultralytics mAP@50 = 0.4096
-per class:  Spot AP@45 0.854 (53 GT)   Hole AP@45 0.000 (16 GT)   ← the lesson
-```
-
-Spot is found; **Hole is not found at all**. On a from-scratch model the minority class is
-exactly what a single mAP number hides — and it is what the next iteration has to attack
-(more Hole annotations, weight the loss, or raise resolution for the small objects).
-
----
-
-## The one metric that matters
-
-Ultralytics reports **mAP@50** and **mAP@50:95**. Neither is the competition number, and
-`model.predict(iou=...)` is NMS, not an evaluation threshold. `scripts/map45.py`
-computes **mAP@45** itself: one-to-one greedy matching by descending confidence, 101-point
-interpolated AP, mean over classes that have ground truth (COCO conventions), and a
-confidence sweep so the submission threshold is *measured* rather than defaulted to 0.25.
-
-```
-class      AP@0.45     GT   pred  missed    FP      P      R
-------------------------------------------------------------
-Spot        0.8700     53    ...
-Hole        0.6100     16    ...
-------------------------------------------------------------
-mAP         0.7400     69   ...
-```
-
-The per-class split is the useful part: with `Spot` far above `Hole`, your score is gated
-by the minority class, and no amount of extra epochs on the majority class will fix it.
-
-**Full explanation of the metric, how the IoU threshold changes what counts as correct,
-and why mAP@45 is an evaluation metric rather than a training objective:
-[`docs/metric_guide.md`](docs/metric_guide.md).**
-
-### One trap worth knowing up front
-
-Ultralytics chooses `best.pt` — and decides when to stop early — using
-`mAP@50:95`, not your competition metric (verified in
-`ultralytics/models/yolo/detect/val.py`). On a small dataset those rankings disagree.
-`select_best.py` re-scores every saved checkpoint on mAP@45; in a 24-epoch test run the
-gap between checkpoints was `0.1073` vs `0.2198`, i.e. **11 points of score** depending
-on which file you submit.
-
----
-
-## Pipeline
-
-| script | what it does | when it fails loudly |
+| what Kaggle says | what it actually means | the fix |
 |---|---|---|
-| `audit_dataset.py` | discovers images/labels, validates coordinates and class ids, profiles the GPU, proposes an imgsz/model, prints the next command | no images, no usable labels, pixel-space coords, unknown class ids, orphan labels |
-| `prepare_dataset.py` | converts YOLO/COCO/VOC/CSV → canonical YOLO, group-aware split, absolute-path `data.prepared.yaml` | any error-level label problem; it refuses to write |
-| `validate_labels.py` | per-image/per-class gate on the *built* dataset + contact sheet with boxes drawn | missing/orphan/duplicate labels, degenerate boxes, manifest disagreement |
-| `train.py` | hardware-adaptive training, records `config.json` per run | no data, no GPU (unless `--allow-cpu`/`--smoke`) |
-| `map45.py` | the scored metric + confidence sweep + worst-image report | missing GT, unreadable predictions |
-| `select_best.py` | scores every saved checkpoint on mAP@45 and copies the winner | refuses to name a winner from noise or from an untrained run |
-| `evaluate.py` | Ultralytics val for PR curves/confusion matrix, then calls `map45.py` | missing weights |
-| `predict.py` | inference, optional `--tile` for tiny targets on large frames | unreadable images |
-| `submit.py` | yolo / kaggle / coco / csv / xml output in **original image pixels** | — |
-| `selftest.py` | known-answer tests for metric, parsing, formats, split, coordinate roundtrip | — |
+| 403 / permission denied | you have not accepted the competition rules | open the page, click **Join / I Accept**, retry |
+| 401 / authentication | token missing or expired | create a fresh `kaggle.json` |
+| 404 / not found | wrong slug, or a `/t/` id used as a slug | check the link form |
+| connection / SSL error | this machine cannot reach Kaggle | use Route B — no token will fix it |
 
-### Detail worth reading
+> **About the `/t/` form:** `/t/<hex>` links are Kaggle **tasks**, and they are frequently
+> private — they require an invitation and may expose **no public download endpoint at all**.
+> If the API keeps refusing while the browser shows you the data, that is expected, not a bug
+> in your setup. Use Route B.
 
-**The split is by component, not by image.** `part012_frame3` and `part012_frame7` are
-the same physical part, three frames apart. Random per-image splitting puts them on both
-sides and your validation mAP becomes a memorisation score. Override the heuristic with
+### Route B — manual download (always works, no token)
+
+1. Open the task/competition page in a browser and download the data files.
+2. Put the archive(s) — `.zip`, `.tar`, `.7z`, `.rar` — into `dataset/raw/`.
+3. Unpack and register them:
+
+```bash
+python scripts/fetch_dataset.py --unpack-only
+```
+
+This performs no network calls whatsoever, unpacks nested archives, and reports how many
+images and label files it found. **Every other script in the project runs fully offline**,
+so Route B is a complete substitute for Route A.
+
+### What happens next, automatically
+
+Whatever route you used, the next command is the same — and it is the one that decides
+everything downstream:
+
+```bash
+python scripts/audit_dataset.py
+```
+
+---
+
+## 3. End-to-end workflow
+
+```bash
+# 0 — environment
+python -m pip install -r requirements.txt        # headless boxes: see the opencv note in the file
+
+# 1 — data in
+python scripts/fetch_dataset.py --check                                    # verify access
+python scripts/fetch_dataset.py --url https://www.kaggle.com/t/<id>        # or --unpack-only
+#             └─ or drop images straight into dataset/raw/
+
+# 2 — audit: what do we actually have, and what is the next command?
+python scripts/audit_dataset.py
+
+# 3 — normalize annotations + build a leakage-safe split
+python scripts/prepare_dataset.py --dry-run       # see what it would do
+python scripts/prepare_dataset.py                  # writes dataset/prepared + configs/data.prepared.yaml
+python scripts/validate_labels.py                  # label gate + a contact sheet you must LOOK at
+
+# 4 — train
+python scripts/train.py --dry-run                  # the config chosen for THIS machine
+python scripts/train.py                            # baseline run
+
+# 5 — choose and score
+python scripts/select_best.py --run ped_baseline    # pick the checkpoint by mAP@45, not mAP@50:95
+python scripts/evaluate.py --name ped_baseline      # Ultralytics metrics + the real mAP@45 + sweep
+
+# 6 — submit
+python scripts/submit.py --weights runs/ped_baseline/weights/best_map45.pt \
+                         --source <test images> --format <organizer format> --conf <swept value>
+```
+
+### What each step does, and why it exists
+
+| # | script | what it decides | failure it prevents |
+|---|---|---|---|
+| 2 | `audit_dataset.py` | Is there data? What label format is really there? Are the boxes in the right coordinate space? What `imgsz`/model/batch does **this** machine support? | training on the wrong folder, or on pixel coordinates mistaken for normalized ones |
+| 2 | `recon_image.py` | what a single real component looks like: target sizes, how many appearances each class has | annotating or aug‑menting for an appearance the model never sees |
+| 3 | `prepare_dataset.py` | converts YOLO/COCO/VOC/CSV → canonical YOLO; splits train/val **by component** | a part appearing in both splits, which inflates validation mAP into a memorisation score |
+| 3 | `validate_labels.py` | are the labels, as written to disk, internally consistent — and do they *look* right? | a swapped Spot/Hole mapping, which is invisible in a table of numbers |
+| 4 | `train.py` | batch size from **free** VRAM, image size from measured target size, model from dataset scale | OOM crashes and a default `imgsz=640` that silently destroys small targets |
+| 5 | `map45.py` | the competition metric itself, plus the confidence threshold | optimising mAP@50 because that is what the trainer prints |
+| 5 | `select_best.py` | which checkpoint to actually ship | submitting a checkpoint the trainer picked by the wrong metric |
+| 6 | `predict.py` / `submit.py` | tiled inference for tiny targets; five output formats in **original image pixels** | coordinates in letterboxed space, which loses the whole submission |
+| — | `selftest.py` | 53 known-answer checks on the metric, parsing, formats, split and coordinate round-trip | the silent failures that only show up as a disappointing score |
+
+---
+
+## 4. Why the details are the way they are
+
+**The split is by component, not by image.** `part012_frame3` and `part012_frame7` are the
+same physical part, captured seconds apart. A random per-image split puts one in train and
+the other in validation, and validation mAP becomes a memorisation score that does not
+transfer to the test set. Override the grouping heuristic with
 `--group-regex '(part\d+)'` when the naming is not guessable.
 
 **`data.prepared.yaml` uses absolute paths on purpose.** Ultralytics resolves a relative
-`path:` in a dataset YAML against its global `datasets_dir`, *not* against the YAML's own
-location, so a relative path that looks right in the file can silently point elsewhere —
-the classic "Dataset not found" on a second machine.
+`path:` in a dataset YAML against its global `datasets_dir` setting, *not* against the
+YAML's own location — so a relative path that looks correct in the file can silently point
+somewhere else. This project reads the YAML back with one shared resolver
+(`_ped/dataset_cfg.py`) instead of hardcoding `dataset/prepared/...`, because Kaggle
+archives rarely use the folder names you expect.
 
-**Empty label files are kept, missing ones are not.** An empty `.txt` = "this part
-genuinely has no spot or hole" (a useful negative). A *missing* `.txt` = probably an
-annotator who did not finish, which is why coverage below ~98% aborts the build.
+**Empty labels are kept; missing labels are not.** An empty `.txt` means "this component
+genuinely has no spot or hole" — a useful negative example. A *missing* `.txt` usually
+means an annotator did not finish, so coverage below ~98% aborts the build rather than
+quietly training on half a dataset.
 
-**Small targets need a decision, not a default.** `audit_dataset.py` reports the median
-and the smallest quartile of box heights, then picks the cheapest imgsz that keeps the
-small quartile above ~12px (the stride-32 floor). If even 1280 cannot, it says so and
-points at `predict.py --tile`.
+**Small targets need a decision, not a default.** The audit reports the median **and the
+smallest quartile** of box heights and picks the cheapest `imgsz` that keeps the small
+quartile above ~12 px (the stride-32 floor). If even 1280 cannot, it says so and points at
+tiled inference rather than pretending a bigger number solves it.
 
----
-
-## Hardware notes
-
-- `pip install ultralytics` does **not** guarantee GPU support. Verify:
-  `python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`.
-  `False` on a GPU box means a CPU-only wheel or a CUDA/driver mismatch.
-- **Headless machines**: ultralytics pulls `opencv-python` (GUI build), which dies with
-  `ImportError: libGL.so.1: cannot open shared object file`. Install
-  `opencv-python-headless` instead of installing libGL, and remove the GUI package if
-  both are present — it shadows the headless one.
-- Batch size is derived from **free** VRAM (not total) minus ~1.2 GiB for the CUDA context,
-  capped conservatively. Raise it only after one clean epoch.
-- The sandbox this repo was built in has no GPU and cannot reach the pretrained-weight CDN,
-  so `train.py` falls back to building the architecture from YAML and prints a warning.
-  From-scratch training is a fallback, not a plan: on a normal machine `yolo11n.pt`
-  downloads automatically and gives a large head start on a small dataset.
+**Colour augmentation is capped deliberately.** For this component, `Hole` appears as a
+near-white through-hole, a near-black shadowed bore, and a saturated warm bore in the same
+photograph. Aggressive hue/saturation augmentation can move one appearance toward another
+and teach the model that the *appearance* is noise. Geometric augmentation is safe and
+useful; colour augmentation is kept moderate.
 
 ---
 
-## What actually moves mAP@45, in order
+## 5. The trap this project exists to avoid
 
-1. **Label correctness and coverage** — swapped class ids or a half-annotated part cost
-   more than any hyperparameter. `validate_labels.py` exists to catch this; look at the sheet.
-2. **Leakage-free validation** — a val score that is too good means the split leaked.
-3. **The minority class** — check the per-class table before and after every change.
-4. **Input resolution / tiling** — only if targets are small relative to the frame.
-5. **Model size and epochs** — usually last, and only once 1–4 are settled.
+Verified in `ultralytics/models/yolo/detect/val.py`:
 
----
+```python
+stats["fitness"] = stats["metrics/mAP50-95(B)"]   # always use box mAP50-95 for fitness
+```
 
-## Repo layout
+Ultralytics chooses `best.pt` — and decides when early stopping fires — using
+**mAP@50:95**. That is not your competition metric, and not even mAP@50. On a small
+dataset the two rankings disagree, and the disagreement costs score. In a 24-epoch test
+run here, two checkpoints from the same run  scored **0.1073** and **0.2198** mAP@45 —
+an 11-point swing from choosing the wrong file.
+
+`scripts/select_best.py` re-scores every saved checkpoint on mAP@45 and copies the winner.
+It refuses to overstate what it knows: checkpoints within 0.005 are reported as a **tie**
+rather than a winner, and a run where everything scores near zero reports **no usable
+checkpoint** instead of naming a winner out of noise.
+
+**Always read the per-class columns, not just the mean.** From this repo's end-to-end run:
 
 ```
-configs/data.prepared.yaml   generated, absolute paths, this is what training reads
-configs/data.yaml            hand-written fallback
-dataset/raw/                 originals — treated as read-only by every script
-dataset/prepared/            canonical YOLO output + manifest.json (seed, groups, counts)
-dataset/prepared/manifest.json  what was converted, how it was split, box counts per split
-runs/                        training runs, reports, label sheets, submissions
-scripts/_ped/                discovery, label parsing, hardware planning, metrics, split
+checkpoint    mAP@45     Spot     Hole
+best.pt       0.4271   0.8540   0.0000
+```
+
+The mean of 0.85 and 0.00 is 0.43 — "roughly half marks". The split says **"Spot works,
+Hole is completely absent"**, which is a data and class-balance problem where extra epochs
+on the majority class will do nothing. That distinction is the difference between a useful
+next action and a wasted day.
+
+---
+
+## 6. What actually raises mAP@45, in order
+
+1. **Label correctness and coverage.** Swapped class ids or a half-annotated component cost
+   more than any hyperparameter. `validate_labels.py` exists to catch this; look at the sheet.
+2. **A leakage-free validation split.** If validation scores look too good, the split leaked.
+3. **The minority class.** Check the per-class table before and after every change; the
+   mean hides the class that is actually gating the score.
+4. **Input resolution and tiling** — only if targets are small relative to the frame.
+5. **Model size and epoch count** — usually last, and only once 1–4 are settled.
+6. **Test-time confidence threshold** — free score, from `map45.py --sweep`. Choose it on
+   validation and pass it to `submit.py --conf`.
+
+---
+
+## 7. Hardware
+
+- `pip install ultralytics` does **not** guarantee GPU support. Check:
+  `python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`.
+  `False` on a GPU box means a CPU-only wheel or a CUDA/driver mismatch.
+- **Headless machines** (Colab, Kaggle notebooks, cloud VMs): ultralytics pulls
+  `opencv-python` (the GUI build), which dies with `ImportError: libGL.so.1: cannot open
+  shared object file`. Install `opencv-python-headless` instead of installing libGL, and
+  remove the GUI package if both are present — it shadows the headless one.
+- Batch size is derived from **free** VRAM minus ~1.2 GiB for the CUDA context, then capped
+  conservatively. Raise it only after one clean epoch.
+- Without a GPU, `train.py` refuses to start a long run. Use `--smoke` to prove the plumbing
+  or `--allow-cpu` to accept the slowness deliberately.
+- If the pretrained-weight download is blocked, `train.py` falls back to building the
+  architecture from YAML **and says so loudly** — from-scratch training is a fallback, never
+  the plan. On a normal machine `yolo11n.pt` downloads automatically and is a large head start.
+
+---
+
+## 8. Status against the plan
+
+| # | plan item | script | state |
+|---|---|---|---|
+| 0 | get the originals into `dataset/raw/` | `fetch_dataset.py` | done — Kaggle API + browser fallback, offline unpack |
+| 1 | install dependencies | `requirements.txt` | done, incl. the headless-opencv trap |
+| 2 | audit dataset + hardware | `audit_dataset.py` | done |
+| 3 | confirm format and class mapping | `audit_dataset.py` §4–5, `recon_image.py` | done |
+| 4 | leakage-safe train/val split | `prepare_dataset.py` | done — grouped by component, stratified, seeded |
+| 5 | train the baseline | `train.py` | done — config derived from the audit, recorded per run |
+| 6 | inspect predictions and per-class errors | `map45.py`, `evaluate.py` | done |
+| 7 | evaluate with mAP@45 | `map45.py`, `select_best.py` | done — own implementation, 53 unit checks, checkpoint selection corrected |
+| 8 | test the submission format | `submit.py` | done — five formats, original-pixel coordinates |
+
+Verified end to end on generated data in a GPU-less sandbox (2 CPU cores, 31 training
+images, 40 epochs from scratch): `mAP@45 = 0.4271`, `Spot 0.854 / Hole 0.000`. The
+per-class split is the finding that matters, and it is exactly what a single number hides.
+
+---
+
+## 9. Repository layout
+
+```
+configs/data.prepared.yaml        generated by prepare_dataset.py, absolute paths, what training reads
+configs/data.yaml                 hand-written fallback
+dataset/raw/                      originals — every script treats this as read-only
+dataset/prepared/                 canonical YOLO output + manifest.json (seed, groups, per-split counts)
+docs/metric_guide.md              what mAP@45 is, in detail
+docs/recon_findings.md            what the first real component looks like, measured
+scripts/_ped/                     discovery, label parsing, dataset config, hardware planning, metrics, split
+scripts/*.py                      the pipeline, listed in §3
+runs/                             training runs, plots, reports, submissions (gitignored)
 ```
 
 `manifest.json` is the audit trail: seed, component groups per split, and box counts per
-class and per split. `validate_labels.py` re-checks the built files against it, which is
-how a converter bug is caught before it becomes a training run.
+class and per split. `validate_labels.py` re-checks the built files against it, which is how
+a converter bug gets caught before it becomes a training run.
+
+**Nothing generated is committed.** `.gitignore` excludes `dataset/`, `runs/`, `*.pt`,
+`*.npy` and the venv — all regenerable from the scripts and pointless in history.
+
+---
+
+## 10. Common problems
+
+| symptom | cause | fix |
+|---|---|---|
+| `Dataset not found` from the trainer | relative `path:` in the yaml | re-run `prepare_dataset.py` (writes absolute paths) |
+| trainer reports **0 images** | `--data` points at a dataset whose layout the yaml does not match | check the printed resolution notes; they name every path tried |
+| Kaggle **403** | competition rules not accepted | open the page, click *Join / I Accept*, retry |
+| Kaggle fails but the browser works | `/t/` task link, private or API-less | `fetch_dataset.py --unpack-only` |
+| `libGL.so.1: cannot open shared object file` | GUI opencv on a headless box | `pip install opencv-python-headless`, remove `opencv-python` |
+| `torch.cuda.is_available()` is `False` on a GPU box | CPU wheel or CUDA/driver mismatch | install the matching torch build from pytorch.org |
+| validation score looks too good | component leaked across the split | check `manifest.json` groups; use `--group-regex` |
+| mAP@45 near zero on both classes | from-scratch weights on too little data, or labels wrong | get the pretrained download working; run `validate_labels.py` |

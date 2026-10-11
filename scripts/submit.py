@@ -155,7 +155,8 @@ def main() -> int:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--weights", help="run the model on --source and submit those predictions")
     src.add_argument("--preds", help="use an existing directory of YOLO+conf txt files")
-    ap.add_argument("--source", default=str(ROOT / "dataset" / "prepared" / "images" / "val"))
+    ap.add_argument("--source", default=None, help="images to predict on "
+                    "(default: the validation split named by configs/data.prepared.yaml)")
     ap.add_argument("--format", default="yolo", choices=["yolo", "kaggle", "coco", "csv", "xml"])
     ap.add_argument("--out", default=None, help="output file or directory (default: runs/submission_<format>)")
     ap.add_argument("--imgsz", type=int, default=640)
@@ -168,6 +169,18 @@ def main() -> int:
     args = ap.parse_args()
 
     from PIL import Image
+
+    if args.source is None:
+        from _ped.dataset_cfg import find_data_yaml, resolve_split_dirs
+
+        yml = find_data_yaml(ROOT)
+        resolved = None
+        if yml:
+            resolved, _lbl, _notes = resolve_split_dirs(yml, "val", root_hint=ROOT)
+        if resolved is None:
+            resolved = ROOT / "dataset" / "raw"
+            print(f"[note] no dataset yaml found; defaulting --source to {resolved}")
+        args.source = str(resolved)
 
     if args.weights:
         from ultralytics import YOLO

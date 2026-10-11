@@ -16,6 +16,11 @@ ultralytics
 #     pip uninstall -y opencv-python
 opencv-python-headless
 
+# KAGGLE DATA (optional — only if you use the automated download)
+# scripts/fetch_dataset.py works with either of these; the browser route needs neither,
+# and every other script in the project runs fully offline.
+kagglehub
+
 # Optional: only if you want to compare your mAP@45 against pycocotools.
 # scripts/map45.py reimplements AP itself and needs nothing extra.
 # pycocotools

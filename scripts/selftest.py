@@ -376,7 +376,8 @@ def test_dataset_config_resolution() -> None:
     at any other dataset reported "0 images / 0 boxes" and the imgsz planning went blind.
     """
     print("\n= dataset config resolution (train.py reads what the trainer reads) =")
-    import train  # noqa: E402  (imported here so the module path stays local)
+    import train  # noqa: E402
+    from _ped.dataset_cfg import resolve_split_dirs  # noqa: E402
 
     tmp = Path(tempfile.mkdtemp())
     root = tmp / "mydata"
@@ -394,7 +395,7 @@ def test_dataset_config_resolution() -> None:
 
     yml = tmp / "data.mine.yaml"
     yml.write_text(f"path: {root}\ntrain: images/train\nval: images/val\nnames:\n  0: Spot\n  1: Hole\n")
-    img_dir, lbl_dir, notes = train.resolve_split_dirs(yml)
+    img_dir, lbl_dir, notes = resolve_split_dirs(yml, "train")
     check("absolute 'path:' resolves to the named split", img_dir == root / "images" / "train", str(img_dir))
     check("labels dir is found at <root>/labels/<split>", lbl_dir == root / "labels" / "train", str(lbl_dir))
 
@@ -412,10 +413,51 @@ def test_dataset_config_resolution() -> None:
     (tmp / "rel" / "ds" / "images" / "train").mkdir(parents=True)
     Image.new("RGB", (100, 100)).save(tmp / "rel" / "ds" / "images" / "train" / "x.jpg")
     rel.write_text("path: ds\ntrain: images/train\nval: images/val\nnames:\n  0: Spot\n")
-    img_dir2, _lbl2, _n2 = train.resolve_split_dirs(rel)
+    img_dir2, _lbl2, _n2 = resolve_split_dirs(rel, "train")
     check("relative 'path:' resolves relative to the yaml",
           img_dir2 == (tmp / "rel" / "ds" / "images" / "train").resolve(), str(img_dir2))
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_kaggle_reference_parsing() -> None:
+    """Kaggle link forms must resolve to the right kind + id before any download.
+
+    A misread here means the download silently targets the wrong resource (or nothing),
+    so it is checked rather than eyeballed.
+    """
+    print("\n= Kaggle reference parsing =")
+    import fetch_dataset as fd  # noqa: E402
+
+    cases = [
+        ("https://www.kaggle.com/t/95c0d96a415c52241ed6c14bb2a0b30a", "task", "95c0d96a415c52241ed6c14bb2a0b30a"),
+        ("https://www.kaggle.com/competitions/foo-bar", "competition", "foo-bar"),
+        ("https://www.kaggle.com/c/titanic", "competition", "titanic"),
+        ("https://www.kaggle.com/datasets/owner/name", "dataset", "owner/name"),
+        ("https://www.kaggle.com/d/owner/name", "dataset", "owner/name"),
+        ("https://www.kaggle.com/datasets/owner/name?select=train.csv", "dataset", "owner/name"),
+        ("https://www.kaggle.com/t/abc/overview", "task", "abc"),
+        ("owner/name", "dataset", "owner/name"),
+    ]
+    ok = 0
+    for url, kind, ident in cases:
+        got_kind, got_id = fd.parse_kaggle_reference(url)
+        if (got_kind, got_id) == (kind, ident):
+            ok += 1
+        else:
+            print(f"    mismatch {url}: got {(got_kind, got_id)} want {(kind, ident)}")
+    check(f"all {len(cases)} Kaggle URL forms parse correctly", ok == len(cases), f"{ok}/{len(cases)}")
+
+    user, key, src = fd.credentials()
+    check("credentials are reported without exposing the secret",
+          key is None or isinstance(src, str), "credentials() leaked no value")
+
+    # the failure text must name the real problem, not a generic error
+    diag = fd.diagnose("Max retries exceeded with url: /v1/...", "task", "abc")
+    check("a network failure is diagnosed as a network failure, not an auth problem",
+          "cannot reach kaggle.com" in diag, diag[:80])
+    diag403 = fd.diagnose("403 Forbidden", "competition", "abc")
+    check("a 403 points at rule acceptance, and mentions the browser fallback for /t/ tasks",
+          "ACCEPTED THE COMPETITION RULES" in diag403 and "browser" in diag403)
 
 
 def main() -> int:
@@ -427,6 +469,7 @@ def main() -> int:
     test_roundtrip()
     test_end_to_end_build()
     test_dataset_config_resolution()
+    test_kaggle_reference_parsing()
     print("\n" + "=" * 62)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

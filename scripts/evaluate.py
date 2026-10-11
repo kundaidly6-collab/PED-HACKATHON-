@@ -73,13 +73,25 @@ def main() -> int:
 
     if not args.skip_map45:
         print("\n=== mAP@45 (the metric you are scored on) ===")
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from _ped.dataset_cfg import resolve_split_dirs
+
+        # Resolve from the dataset yaml instead of assuming dataset/prepared: the data
+        # may have come from Kaggle with any folder names, and a hardcoded path here
+        # silently scores against nothing.
+        img_dir, lbl_dir, notes = resolve_split_dirs(Path(args.data), args.split, root_hint=ROOT)
+        for n in notes:
+            print(f"  · {n}")
+        if img_dir is None or lbl_dir is None:
+            print("  [SKIP] cannot locate the split for scoring — pass --data pointing at the yaml")
+            return 0
         cmd = [
             sys.executable,
             str(ROOT / "scripts" / "map45.py"),
             "--weights", str(weights),
             "--imgsz", str(args.imgsz),
-            "--labels", str(ROOT / "dataset" / "prepared" / "labels" / args.split),
-            "--images", str(ROOT / "dataset" / "prepared" / "images" / args.split),
+            "--labels", str(lbl_dir),
+            "--images", str(img_dir),
             "--sweep",
             "--report-json", str(ROOT / "runs" / f"{args.name}_map45.json"),
         ]
