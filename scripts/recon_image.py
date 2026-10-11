@@ -143,6 +143,63 @@ def dedupe(cands: list, tol: float = 0.6) -> list:
     return kept
 
 
+def containment(a: tuple, b: tuple) -> float:
+    """Fraction of the smaller circle that lies inside the larger one.
+
+    Centre-distance de-duplication misses the common failure where one detector reports
+    a big loose circle around a feature and another reports a tight circle on the same
+    feature: the centres coincide but the radii differ by 2x, so the small circle scores
+    as "a different object". IoU misses it too (a small box inside a large one has low
+    IoU). Containment catches it.
+    """
+    d = float(np.hypot(a[0] - b[0], a[1] - b[1]))
+    r_small, r_big = sorted((float(a[2]), float(b[2])))
+    if r_big <= 0:
+        return 0.0
+    if d + r_small <= r_big:
+        return 1.0                                   # fully inside
+    # partial overlap area of two circles, relative to the smaller circle's area
+    if d >= r_small + r_big:
+        return 0.0
+    r1, r2 = r_small, r_big
+    part = (r1 ** 2 * np.arccos(np.clip((d ** 2 + r1 ** 2 - r2 ** 2) / (2 * d * r1), -1, 1))
+            + r2 ** 2 * np.arccos(np.clip((d ** 2 + r2 ** 2 - r1 ** 2) / (2 * d * r2), -1, 1))
+            - 0.5 * np.sqrt(np.clip((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2), 0, None)))
+    return float(part / (np.pi * r1 ** 2)) if r1 > 0 else 0.0
+
+
+def merge_contained(cands: list, keep_ratio: float = 0.7) -> tuple[list, int]:
+    """Collapse nested circles, preferring the TIGHTER one (better localisation).
+
+    Returns (kept, n_removed) so the caller can report how much noise was suppressed.
+    """
+    kept: list = []
+    removed = 0
+    for c in sorted(cands, key=lambda t: t[2]):        # smallest first -> tightest wins
+        if any(containment(c, k) >= keep_ratio for k in kept):
+            removed += 1
+            continue
+        kept.append(c)
+    return kept, removed
+
+
+def edge_distance_map(mask: np.ndarray) -> np.ndarray:
+    """Distance from every pixel to the nearest non-mask pixel.
+
+    Used to decide whether a feature sits in the blank outer flange (near the edge) or
+    deep inside the panel. A percentage-of-bounding-box rule fails on real parts: the
+    recess is not a uniform inset, so a weld near the lower edge of the recess gets
+    classified as a perimeter hole. Distance to the actual part boundary does not care
+    about the shape.
+    """
+    import cv2
+
+    m = (mask > 0).astype(np.uint8)
+    if m.sum() == 0:
+        return np.zeros(mask.shape, np.float32)
+    return cv2.distanceTransform(m, cv2.DIST_L2, 5)
+
+
 def classify_appearance(img: np.ndarray, cx: float, cy: float, r: float) -> tuple[str, dict]:
     """What does the INSIDE of this circle look like?
 

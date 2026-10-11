@@ -1,8 +1,12 @@
 # PED Hackathon — Spot & Hole detection on pressed metal components
 
 **Goal: train the best possible detector for the two target classes, measured by
-mAP@45. A higher mAP@45 means better detection performance — that is the number this
+mAP@50. A higher mAP@50 means better detection performance — that is the number this
 project optimises for, and the only number that decides the ranking.**
+
+> Training images are supplied **without labels**, so annotation is part of the task, not
+> a given: `scripts/propose_labels.py` proposes boxes and `scripts/annotate.py` is the UI
+> where a human confirms them. Nothing proposed is a training label until it is reviewed.
 
 | id | class | what it is |
 |----|-------|-----------|
@@ -23,28 +27,31 @@ the next.
 
 ### The metric, and why it is not just "accuracy"
 
-mAP@45 is **mean Average Precision at IoU threshold 0.45**. Reading it from the inside out:
+mAP@50 is **mean Average Precision at IoU threshold 0.50**. Reading it from the inside out:
 
 1. **IoU** (intersection over union) measures how well a predicted box overlaps the true box. `1.0` = identical, `0.0` = no overlap.
-2. A prediction counts as a **true positive** only if its IoU with an unmatched ground-truth box is **≥ 0.45**. Otherwise it is a **false positive**. Any ground-truth box never matched is a **miss**.
+2. A prediction counts as a **true positive** only if its IoU with an unmatched ground-truth box is **≥ 0.50**. Otherwise it is a **false positive**. Any ground-truth box never matched is a **miss**.
 3. Matching is done **highest-confidence-first** and is strictly one-to-one, so a second box on the same object is a false positive, not a second hit.
 4. **AP** for a class is the area under the precision–recall curve obtained by sweeping the confidence threshold — it summarises every possible threshold in one number.
 5. **mAP** is the mean of AP over the classes that have ground truth. Here: `(AP_Spot + AP_Hole) / 2`.
 
-So **mAP@45 rewards finding objects and penalises only genuinely sloppy boxes.** The 0.45
-is a slightly more forgiving localisation requirement than the classic 0.50, which suits
-small targets with soft edges. Because a fixed pixel error means something different at
-every object scale — 3 px of slop is harmless on a 48 px hole (IoU 0.88) and fatal on a
-10 px one (IoU 0.54) — the threshold choice materially changes what counts as correct.
+So **mAP@50 rewards finding objects and penalises only genuinely sloppy boxes.** It is
+the classic PASCAL VOC threshold and the one this competition scores at. Because a fixed
+pixel error means something different at every object scale — 3 px of slop is harmless on
+a 48 px hole (IoU 0.88) and fatal on a 10 px one (IoU 0.54) — the threshold materially
+changes what counts as correct, and **@50 is stricter than @45**: a box sitting at IoU
+0.493 scores 1.000 at @45 and **0.000** at @50. Every default in this repo is 0.50;
+`--iou 0.45` and `--iou 0.75` are diagnostics, and the scorer prints the threshold it used
+with every result.
 
-> **Full walkthrough, including the localisation-tolerance table and why mAP@45 is an
+> **Full walkthrough, including the localisation-tolerance table and why mAP@50 is an
 > evaluation metric rather than a training objective: [`docs/metric_guide.md`](docs/metric_guide.md).**
 
 ### The one distinction that matters most
 
-**You do not train *with* mAP@45.** It is not differentiable — it contains a discrete
+**You do not train *with* mAP@50.** It is not differentiable — it contains a discrete
 match/no-match decision and a sort by confidence, so there is no gradient to descend.
-Training minimises a **loss** (box regression + classification + DFL). mAP@45 is then
+Training minimises a **loss** (box regression + classification + DFL). mAP@50 is then
 *measured* on held-out images to decide:
 
 1. **which checkpoint to submit** — and Ultralytics' own `best.pt` is chosen by mAP@50:95, *not* your metric (see §5),
@@ -151,11 +158,11 @@ python scripts/train.py --dry-run                  # the config chosen for THIS 
 python scripts/train.py                            # baseline run
 
 # 5 — choose and score
-python scripts/select_best.py --run ped_baseline    # pick the checkpoint by mAP@45, not mAP@50:95
-python scripts/evaluate.py --name ped_baseline      # Ultralytics metrics + the real mAP@45 + sweep
+python scripts/select_best.py --run ped_baseline    # pick the checkpoint by mAP@50, not mAP@50:95
+python scripts/evaluate.py --name ped_baseline      # Ultralytics metrics + the real mAP@50 + sweep
 
 # 6 — submit
-python scripts/submit.py --weights runs/ped_baseline/weights/best_map45.pt \
+python scripts/submit.py --weights runs/ped_baseline/weights/best_metric.pt \
                          --source <test images> --format <organizer format> --conf <swept value>
 ```
 
@@ -168,7 +175,7 @@ python scripts/submit.py --weights runs/ped_baseline/weights/best_map45.pt \
 | 3 | `prepare_dataset.py` | converts YOLO/COCO/VOC/CSV → canonical YOLO; splits train/val **by component** | a part appearing in both splits, which inflates validation mAP into a memorisation score |
 | 3 | `validate_labels.py` | are the labels, as written to disk, internally consistent — and do they *look* right? | a swapped Spot/Hole mapping, which is invisible in a table of numbers |
 | 4 | `train.py` | batch size from **free** VRAM, image size from measured target size, model from dataset scale | OOM crashes and a default `imgsz=640` that silently destroys small targets |
-| 5 | `map45.py` | the competition metric itself, plus the confidence threshold | optimising mAP@50 because that is what the trainer prints |
+| 5 | `eval_map.py` | the competition metric itself (`--iou`, default 0.50), plus the confidence sweep | optimising mAP@50 because that is what the trainer prints |
 | 5 | `select_best.py` | which checkpoint to actually ship | submitting a checkpoint the trainer picked by the wrong metric |
 | 6 | `predict.py` / `submit.py` | tiled inference for tiny targets; five output formats in **original image pixels** | coordinates in letterboxed space, which loses the whole submission |
 | — | `selftest.py` | 53 known-answer checks on the metric, parsing, formats, split and coordinate round-trip | the silent failures that only show up as a disappointing score |
@@ -219,19 +226,22 @@ stats["fitness"] = stats["metrics/mAP50-95(B)"]   # always use box mAP50-95 for 
 Ultralytics chooses `best.pt` — and decides when early stopping fires — using
 **mAP@50:95**. That is not your competition metric, and not even mAP@50. On a small
 dataset the two rankings disagree, and the disagreement costs score. In a 24-epoch test
-run here, two checkpoints from the same run  scored **0.1073** and **0.2198** mAP@45 —
-an 11-point swing from choosing the wrong file.
+run here, two checkpoints from the same run scored **0.1073** and **0.2198** mAP@45 (that
+test predates the correct threshold; the *swing* is the point, and it exceeds 11 points) —
+choosing the wrong file is expensive whatever the threshold.
 
-`scripts/select_best.py` re-scores every saved checkpoint on mAP@45 and copies the winner.
+`scripts/select_best.py` re-scores every saved checkpoint on mAP@50 and copies the winner.
 It refuses to overstate what it knows: checkpoints within 0.005 are reported as a **tie**
 rather than a winner, and a run where everything scores near zero reports **no usable
 checkpoint** instead of naming a winner out of noise.
 
-**Always read the per-class columns, not just the mean.** From this repo's end-to-end run:
+**Always read the per-class columns, not just the mean.** From this repo's end-to-end run
+(recorded at IoU 0.45, before the competition threshold was confirmed as 0.50 — so treat
+the absolute figure as an upper bound, not a score):
 
 ```
-checkpoint    mAP@45     Spot     Hole
-best.pt       0.4271   0.8540   0.0000
+checkpoint    IoU      metric     Spot     Hole
+best.pt       0.45     0.4271   0.8540   0.0000
 ```
 
 The mean of 0.85 and 0.00 is 0.43 — "roughly half marks". The split says **"Spot works,
@@ -241,7 +251,7 @@ next action and a wasted day.
 
 ---
 
-## 6. What actually raises mAP@45, in order
+## 6. What actually raises mAP@50, in order
 
 1. **Label correctness and coverage.** Swapped class ids or a half-annotated component cost
    more than any hyperparameter. `validate_labels.py` exists to catch this; look at the sheet.
@@ -250,7 +260,7 @@ next action and a wasted day.
    mean hides the class that is actually gating the score.
 4. **Input resolution and tiling** — only if targets are small relative to the frame.
 5. **Model size and epoch count** — usually last, and only once 1–4 are settled.
-6. **Test-time confidence threshold** — free score, from `map45.py --sweep`. Choose it on
+6. **Test-time confidence threshold** — free score, from `eval_map.py --sweep`. Choose it on
    validation and pass it to `submit.py --conf`.
 
 ---
@@ -284,12 +294,13 @@ next action and a wasted day.
 | 3 | confirm format and class mapping | `audit_dataset.py` §4–5, `recon_image.py` | done |
 | 4 | leakage-safe train/val split | `prepare_dataset.py` | done — grouped by component, stratified, seeded |
 | 5 | train the baseline | `train.py` | done — config derived from the audit, recorded per run |
-| 6 | inspect predictions and per-class errors | `map45.py`, `evaluate.py` | done |
-| 7 | evaluate with mAP@45 | `map45.py`, `select_best.py` | done — own implementation, 53 unit checks, checkpoint selection corrected |
+| 6 | inspect predictions and per-class errors | `eval_map.py`, `evaluate.py` | done |
+| 7 | evaluate with mAP@50 | `eval_map.py`, `select_best.py` | done — own implementation, 53 unit checks, checkpoint selection corrected |
 | 8 | test the submission format | `submit.py` | done — five formats, original-pixel coordinates |
 
 Verified end to end on generated data in a GPU-less sandbox (2 CPU cores, 31 training
-images, 40 epochs from scratch): `mAP@45 = 0.4271`, `Spot 0.854 / Hole 0.000`. The
+images, 40 epochs from scratch): `Spot 0.854 / Hole 0.000`, mean 0.4271 — measured at the
+old IoU 0.45 default, so re-run with the current @50 default before quoting a number. The
 per-class split is the finding that matters, and it is exactly what a single number hides.
 
 ---
@@ -301,7 +312,7 @@ configs/data.prepared.yaml        generated by prepare_dataset.py, absolute path
 configs/data.yaml                 hand-written fallback
 dataset/raw/                      originals — every script treats this as read-only
 dataset/prepared/                 canonical YOLO output + manifest.json (seed, groups, per-split counts)
-docs/metric_guide.md              what mAP@45 is, in detail
+docs/metric_guide.md              what mAP@50 is, in detail
 docs/recon_findings.md            what the first real component looks like, measured
 scripts/_ped/                     discovery, label parsing, dataset config, hardware planning, metrics, split
 scripts/*.py                      the pipeline, listed in §3
@@ -328,4 +339,4 @@ a converter bug gets caught before it becomes a training run.
 | `libGL.so.1: cannot open shared object file` | GUI opencv on a headless box | `pip install opencv-python-headless`, remove `opencv-python` |
 | `torch.cuda.is_available()` is `False` on a GPU box | CPU wheel or CUDA/driver mismatch | install the matching torch build from pytorch.org |
 | validation score looks too good | component leaked across the split | check `manifest.json` groups; use `--group-regex` |
-| mAP@45 near zero on both classes | from-scratch weights on too little data, or labels wrong | get the pretrained download working; run `validate_labels.py` |
+| mAP@50 near zero on both classes | from-scratch weights on too little data, or labels wrong | get the pretrained download working; run `validate_labels.py` |

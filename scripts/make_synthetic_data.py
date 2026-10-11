@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a FAKE dataset that looks structurally like a real one.
 
-Purpose: verify the pipeline end-to-end (audit → convert → validate → train → mAP@45
+Purpose: verify the pipeline end-to-end (audit → convert → validate → train → mAP@50
 → submit) on a machine with no GPU and no data, so that when the real dataset arrives
 you are debugging your model and not your plumbing.
 

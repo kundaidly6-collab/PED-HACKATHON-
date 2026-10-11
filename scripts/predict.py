@@ -171,7 +171,7 @@ def main() -> int:
 
     print(f"\ntotals: " + ", ".join(f"{model.names.get(k, k)}={v}" for k, v in sorted(totals.items())))
     print(f"labels (YOLO format, with confidence) → {out_dir / 'labels'}")
-    print("next: score them with  python scripts/map45.py --preds " + str(out_dir / "labels") + " --labels <gt dir>")
+    print("next: score them with  python scripts/eval_map.py --preds " + str(out_dir / "labels") + " --labels <gt dir>")
     return 0
 
 

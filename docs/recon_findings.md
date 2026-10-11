@@ -74,4 +74,4 @@ class mapping across the entire dataset — the single most expensive mistake av
 If the real set shares this design: **~11 Hole** instances (perimeter) and **1–4 Spot**
 instances (interior), i.e. a strongly Hole-tilted class distribution. Note this is the
 *opposite* imbalance from the synthetic demo, where Spot outnumbered Hole. Expect the
-minority class (Spot) to gate mAP@45 and plan annotation effort accordingly.
+minority class (Spot) to gate mAP@50 and plan annotation effort accordingly.

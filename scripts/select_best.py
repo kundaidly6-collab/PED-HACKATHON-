@@ -6,12 +6,13 @@ its own fitness, which for detection is
 
     stats["fitness"] = stats["metrics/mAP50-95(B)"]   # always use box mAP50-95
 
-i.e. mAP@50:95 — not mAP@45, not even mAP@50. So the checkpoint the trainer calls
+i.e. mAP@50:95 — which is neither mAP@45 nor the competition's own mAP@50, because it
+has already averaged those thresholds away. So the checkpoint the trainer calls
 "best" is chosen by a metric you are not scored on, and on a small dataset the two can
 disagree. (train.py saves an epoch checkpoint every `save_period`, so the candidates
 already exist on disk; they just were not being compared on the right yardstick.)
 
-This script scores every saved checkpoint on the validation split with the same mAP@45
+This script scores every saved checkpoint on the validation split with the same mAP@50
 implementation used everywhere else in this repo, prints the comparison, and copies the
 winner next to the run's weights.
 
@@ -32,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Two checkpoints within this much mAP@45 are indistinguishable given one validation
+# Two checkpoints within this much mAP@50 are indistinguishable given one validation
 # split this small; reporting a winner from noise would be false precision.
 NOISE = 0.005
 # Below this, the run has not learned anything worth submitting.
@@ -44,16 +45,16 @@ from _ped.metrics import best_confidence, score  # noqa: E402
 
 
 def score_checkpoint(weights: Path, img_dir: Path, lbl_dir: Path, sizes, gt, imgsz: int,
-                     conf: float, device: str | None) -> dict:
-    import map45  # reuse the verified predictor + GT loader
+                     conf: float, device: str | None, iou: float = 0.50) -> dict:
+    import eval_map  # reuse the verified predictor + GT loader
 
-    preds = map45.run_model(weights, img_dir, sizes, imgsz, conf, device)
-    card = score(gt, preds, iou_threshold=0.45,
+    preds = eval_map.run_model(weights, img_dir, sizes, imgsz, conf, device)
+    card = score(gt, preds, iou_threshold=iou,
                  class_names={i: n for i, n in enumerate(CLASS_NAMES)}, conf_steps=0)
     return {
         "weights": str(weights),
         "name": weights.name,
-        "map45": round(card.map, 4),
+        "score": round(card.map, 4),  # key kept for report compatibility; threshold is args.iou
         "per_class": {s.name: (None if s.n_gt == 0 else round(s.ap, 4)) for s in card.per_class},
         "n_pred": card.n_pred,
         "n_fn": sum(s.n_fn for s in card.per_class),
@@ -71,6 +72,7 @@ def main() -> int:
     ap.add_argument("--split", default="val")
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--conf", type=float, default=0.01, help="inference floor for a fair comparison")
+    ap.add_argument("--iou", type=float, default=0.50, help="IoU threshold; 0.50 is the official metric")
     ap.add_argument("--device", default=None)
     ap.add_argument("--copy-to", default=None, help="copy the winner here (e.g. .../weights/chosen.pt)")
     ap.add_argument("--report-json", default=None)
@@ -101,16 +103,16 @@ def main() -> int:
         print(f"[ERROR] could not resolve the {args.split} split from {data_yaml}", file=sys.stderr)
         return 2
 
-    import map45
+    import eval_map
 
-    sizes = map45.read_sizes(img_dir)
-    gt = map45.gt_from_labels(lbl_dir, sizes)
+    sizes = eval_map.read_sizes(img_dir)
+    gt = eval_map.gt_from_labels(lbl_dir, sizes)
     n_gt = sum(len(v) for v in gt.values())
     if n_gt == 0:
         print(f"[ERROR] no ground truth in {lbl_dir}", file=sys.stderr)
         return 2
 
-    print(f"=== checkpoint selection on mAP@45 ===")
+    print(f"=== checkpoint selection on mAP@{args.iou:g} ===")
     print(f"  split     : {img_dir}  ({len(sizes)} images, {n_gt} GT boxes)")
     print(f"  imgsz     : {args.imgsz}   conf floor: {args.conf}")
     print(f"  candidates: {len(candidates)}\n")
@@ -118,7 +120,7 @@ def main() -> int:
     rows = []
     for w in candidates:
         try:
-            rows.append(score_checkpoint(w, img_dir, lbl_dir, sizes, gt, args.imgsz, args.conf, args.device))
+            rows.append(score_checkpoint(w, img_dir, lbl_dir, sizes, gt, args.imgsz, args.conf, args.device, args.iou))
         except Exception as exc:
             print(f"  [skip] {w.name}: {type(exc).__name__}: {str(exc)[:110]}")
 
@@ -126,20 +128,20 @@ def main() -> int:
         print("[ERROR] every checkpoint failed to score", file=sys.stderr)
         return 2
 
-    head = f"{'checkpoint':<16}{'mAP@45':>9}" + "".join(f"{n:>9}" for n in CLASS_NAMES) + f"{'missed':>8}{'FP':>7}{'MiB':>7}"
+    head = f"{'checkpoint':<16}{f'mAP@{args.iou:g}':>9}" + "".join(f"{n:>9}" for n in CLASS_NAMES) + f"{'missed':>8}{'FP':>7}{'MiB':>7}"
     print(head)
     print("-" * len(head))
     for r in rows:
         cells = "".join(f"{(r['per_class'].get(n) if r['per_class'].get(n) is not None else float('nan')):>9.4f}" for n in CLASS_NAMES)
-        print(f"{r['name']:<16}{r['map45']:>9.4f}{cells}{r['n_fn']:>8}{r['n_fp']:>7}{r['size_mib']:>7.1f}")
+        print(f"{r['name']:<16}{r['score']:>9.4f}{cells}{r['n_fn']:>8}{r['n_fp']:>7}{r['size_mib']:>7.1f}")
 
-    top = max(r["map45"] for r in rows)
-    tied = [r for r in rows if top - r["map45"] <= NOISE]
+    top = max(r["score"] for r in rows)
+    tied = [r for r in rows if top - r["score"] <= NOISE]
     # Prefer the checkpoint the trainer maintained (best.pt) when there is no evidence
     # to override it: an epoch dump still carries optimizer state and is not the
     # intended product. Ties are reported, not silently broken.
     preferred = [r for r in tied if r["name"] in ("best.pt", "last.pt")] or tied
-    winner = max(preferred, key=lambda r: r["map45"])
+    winner = max(preferred, key=lambda r: r["score"])
 
     # A run that scored nothing has not produced a winner, and saying otherwise is the
     # exact false confidence this repo tries to avoid.
@@ -159,27 +161,27 @@ def main() -> int:
             print(f"  report → {args.report_json}")
         return 1
 
-    print(f"\nBEST mAP@45: {winner['name']}  ({winner['map45']:.4f})")
+    print(f"\nBEST mAP@{args.iou:g}: {winner['name']}  ({winner['score']:.4f})")
     if len(tied) > 1:
-        names = ", ".join(f"{r['name']} {r['map45']:.4f}" for r in tied)
+        names = ", ".join(f"{r['name']} {r['score']:.4f}" for r in tied)
         print(f"  {len(tied)} checkpoints are within {NOISE} of each other ({names}).")
         print(f"  Reporting a tie rather than a winner; defaulting to {winner['name']}.")
         print("  With scores this close, re-run with more epochs — the ranking is not yet meaningful.")
 
     ultralytics_best = next((r for r in rows if r["name"] == "best.pt"), None)
     if ultralytics_best:
-        delta = winner["map45"] - ultralytics_best["map45"]
+        delta = winner["score"] - ultralytics_best["score"]
         if winner["name"] == "best.pt":
-            print("  Ultralytics' own choice agrees with mAP@45 here — use best.pt.")
+            print("  Ultralytics' own choice agrees with mAP@50 here — use best.pt.")
         elif delta <= NOISE:
-            print(f"  Ultralytics' best.pt ties on mAP@45 ({ultralytics_best['map45']:.4f}); keeping best.pt.")
+            print(f"  Ultralytics' best.pt ties on mAP@{args.iou:g} ({ultralytics_best['score']:.4f}); keeping best.pt.")
         else:
-            print(f"  NOTE: Ultralytics' best.pt scores {ultralytics_best['map45']:.4f} on mAP@45 "
+            print(f"  NOTE: Ultralytics' best.pt scores {ultralytics_best['score']:.4f} on mAP@{args.iou:g} "
                   f"({delta:+.4f} vs the winner).")
             print("        ultralytics picks best.pt by mAP@50:95, which is not the competition metric.")
             print(f"        Submit {winner['name']} unless you have a reason not to.")
 
-    target = Path(args.copy_to) if args.copy_to else Path(winner["weights"]).parent / "best_map45.pt"
+    target = Path(args.copy_to) if args.copy_to else Path(winner["weights"]).parent / "best_metric.pt"
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(winner["weights"], target)
     print(f"\n  copied → {target}")

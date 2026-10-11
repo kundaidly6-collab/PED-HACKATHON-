@@ -244,7 +244,7 @@ def audit_plan(root: Path, stats) -> None:
         print(f" {line}")
     n_img = stats.images
     if n_img < 40:
-        print(f"\n  [RISK] {n_img} labeled images is very few. mAP@45 will be dominated by annotation\n"
+        print(f"\n  [RISK] {n_img} labeled images is very few. mAP@50 will be dominated by annotation\n"
               f"         quality, not architecture. Priorities: more boxes, correct class mapping,\n"
               f"         no part leaking between splits. Use pretrained weights and light augmentation.")
     if stats.max_side() >= 1600 and plan.image_size < stats.max_side():

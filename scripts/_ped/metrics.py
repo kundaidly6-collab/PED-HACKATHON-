@@ -1,9 +1,12 @@
-"""mAP@45 — the metric this competition is actually scored on.
+"""mAP@50 — the metric this competition is actually scored on.
 
-Ultralytics reports mAP@50 and mAP@50-95. Neither is mAP@45, and the ``iou`` kwarg on
-predict/NMS is *not* an evaluation threshold. So we score predictions ourselves using
-COCO conventions: one-to-one greedy matching by descending confidence, 101-point
-interpolated AP over a recall grid, averaged over the classes that have ground truth.
+Ultralytics reports mAP@50 and mAP@50-95 as *training* read-outs, selected by its own
+fitness rule, and the ``iou`` kwarg on predict/NMS is *not* an evaluation threshold. So we
+score predictions ourselves using COCO conventions: one-to-one greedy matching by
+descending confidence, 101-point interpolated AP over a recall grid, averaged over the
+classes that have ground truth. The IoU threshold is a parameter (default 0.50, the
+competition's); ``--iou 0.45`` and ``--iou 0.75`` are available as looser/stricter
+diagnostics, and the threshold is printed with every result.
 
 Confidence is swept as well, so the submission threshold is chosen from validation
 data instead of guessed.
@@ -146,7 +149,7 @@ def score(
     gt: dict[str, list[GTBox]],
     preds: dict[str, list[PredBox]],
     *,
-    iou_threshold: float = 0.45,
+    iou_threshold: float = 0.50,  # the competition metric is mAP@50; see docs/metric_guide.md
     class_names: dict[int, str] | None = None,
     conf_steps: int = 40,
 ) -> ScoreCard:

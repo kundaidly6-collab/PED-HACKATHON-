@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Known-answer tests for the parts of this pipeline that fail QUIETLY.
 
-A broken audit script is obvious. A broken mAP@45 or a broken train/val split is not —
+A broken audit script is obvious. A broken mAP@50 or a broken train/val split is not —
 both produce plausible-looking numbers, and you would only discover the problem after
 the deadline. So these are checked against hand-computed answers:
 
@@ -35,6 +35,7 @@ from _ped.labels import Box, parse_yolo_text, parse_voc_xml, coco_category_map  
 from _ped.metrics import GTBox, PredBox, score  # noqa: E402
 from _ped.split import build_prepared, choose_source, group_key, plan_split  # noqa: E402
 from _ped.discovery import build_layout  # noqa: E402
+import annotate  # noqa: E402  (local annotation UI: label writer + save routing)
 
 PASS, FAIL = [], []
 
@@ -56,7 +57,13 @@ def pred_one(x1, y1, x2, y2, conf=0.9, cls=0) -> PredBox:
 # --------------------------------------------------------------- metric
 
 def test_metric() -> None:
-    print("\n= mAP@45 metric (the scored number) =")
+    print("\n= mAP@50 metric (the scored number) =")
+    # The competition threshold is 0.50. This guards the assumption most easily lost in
+    # a refactor: a default of 0.45 silently over-reports every score.
+    import inspect
+    default_iou = inspect.signature(score).parameters["iou_threshold"].default
+    check("score() defaults to the competition threshold 0.50 (not 0.45)",
+          default_iou == 0.50, f"found {default_iou}")
     gt = {"a": [gt_one(0, 0, 100, 100)], "b": [gt_one(200, 0, 300, 100)]}
 
     perfect = {"a": [pred_one(0, 0, 100, 100, 0.9)], "b": [pred_one(200, 0, 300, 100, 0.8)]}
@@ -279,6 +286,69 @@ def test_split() -> None:
           any("impossible" in n for n in single.notes), str(single.notes))
 
 
+# --------------------------------------------------------------- annotation
+
+def test_annotation_stack() -> None:
+    """The label writer and the save router: the two places where a slip costs work.
+
+    Annotation is a human typing for hours. These checks are about the failure modes
+    that would throw that away — a label file that cannot be parsed, a class id the
+    trainer does not know, or a save that lands on the wrong image.
+    """
+    print("\n= annotation: label writing and save routing =")
+
+    # 1. clamping: a box dragged past the image edge must not become an invalid label
+    text = annotate.render_yolo([{"c": 0, "x": 1.4, "y": -0.3, "w": 2.0, "h": 0.5}])
+    parts = text.split()
+    check("out-of-range coordinates are clamped into [0, 1]",
+          parts[1] == "1.000000" and parts[2] == "0.000000" and parts[3] == "1.000000",
+          f"got {text.strip()!r}")
+    check("a clamped line still has exactly 5 fields", len(parts) == 5, f"got {len(parts)}")
+
+    # 2. class ids: only 0=Spot and 1=Hole exist. A stray id would train a phantom class.
+    try:
+        annotate.render_yolo([{"c": 2, "x": 0.5, "y": 0.5, "w": 0.1, "h": 0.1}])
+        check("an unknown class id is rejected", False, "class 2 was accepted")
+    except ValueError:
+        check("an unknown class id is rejected", True)
+
+    # 3. a written file must survive the same parser the rest of the repo uses
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "x.txt"
+        boxes = [{"c": 1, "x": 0.25, "y": 0.5, "w": 0.1, "h": 0.2},
+                 {"c": 0, "x": 0.75, "y": 0.5, "w": 0.2, "h": 0.2}]
+        annotate.save_yolo(f, boxes)
+        back = annotate.load_yolo(f)
+        check("save->load round-trips every box, class included",
+              len(back) == 2 and back[0]["c"] == 1 and back[1]["c"] == 0
+              and abs(back[0]["x"] - 0.25) < 1e-6 and abs(back[1]["w"] - 0.2) < 1e-6,
+              f"got {back}")
+        parsed, findings = parse_yolo_text(f.read_text(), "selftest-annotate")
+        check("the repo's own label parser accepts what the UI writes",
+              len(parsed) == 2 and sorted(b.cls for b in parsed) == [0, 1] and not findings,
+              f"got {len(parsed)} boxes, findings={findings}")
+        # an empty image is legitimate (it may genuinely have no defects)
+        annotate.save_yolo(f, [])
+        check("an image with no boxes writes an empty file, not a malformed one",
+              f.read_text() == "" and annotate.load_yolo(f) == [])
+
+    # 4. save routing: never guess which image a request means
+    images = [{"path": "/tmp/a/part01.png"}, {"path": "/tmp/a/part02.png"}]
+    check("save by index resolves", annotate.resolve_image(images, {"i": 1})["path"].endswith("part02.png"))
+    check("save by filename resolves", annotate.resolve_image(images, {"key": "part01.png"})["path"].endswith("part01.png"))
+    for bad, why in [({}, "no index and no key"), ({"i": -1}, "index -1"), ({"i": 9}, "index past the end"),
+                     ({"key": "nope.png"}, "a filename that is not in the list")]:
+        try:
+            annotate.resolve_image(images, bad)
+            check(f"a save request with {why} is REFUSED", False, f"it was accepted: {bad}")
+        except ValueError:
+            check(f"a save request with {why} is REFUSED", True)
+
+    # 5. the class ids the UI writes must be the ones the competition names
+    check("annotation classes are 0=Spot and 1=Hole, matching the competition",
+          annotate.CLASS_NAMES == {0: "Spot", 1: "Hole"}, f"got {annotate.CLASS_NAMES}")
+
+
 # --------------------------------------------------------------- roundtrip
 
 def test_roundtrip() -> None:
@@ -467,6 +537,7 @@ def main() -> int:
     test_format_equivalence()
     test_split()
     test_roundtrip()
+    test_annotation_stack()
     test_end_to_end_build()
     test_dataset_config_resolution()
     test_kaggle_reference_parsing()

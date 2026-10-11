@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""The metric that actually wins the hackathon: mAP@45, computed properly.
+"""The competition metric, computed properly: mAP at a chosen IoU threshold.
 
-Ultralytics' ``model.val()`` gives mAP@50 and mAP@50:95. ``--iou`` at inference only
-changes NMS, not the evaluation threshold. So this scores the model ourselves:
+**The official evaluation for this hackathon is mAP@50** (``--iou 0.50``, the default).
+The threshold is a first-class parameter here rather than a hardcoded constant, so the
+same script covers @50, the stricter COCO-style @75, or @45 — and prints whichever it
+actually used, so a report can never be misread.
+
+Ultralytics' ``model.val()`` gives mAP@50 and mAP@50:95, but ``--iou`` at inference only
+changes NMS, not the evaluation threshold. This scores the model itself:
 
   ground truth : YOLO label files of the split
   predictions  : YOLO-format .txt files (per image) OR a trained model run live
-  matching     : one-to-one greedy, descending confidence, IoU >= 0.45
+  matching     : one-to-one greedy, descending confidence, IoU >= --iou
   AP           : 101-point interpolation over a 0..1 recall grid, per class
   mAP          : mean over classes that have ground truth  (COCO convention)
 
-Also sweeps the confidence threshold, because the organizers' score does depend on
-which boxes you submit — that choice should be measured, not defaulted to 0.25.
+Also sweeps the confidence threshold, because the score depends on which boxes you
+submit — that choice should be measured, not defaulted to 0.25.
 
-    python scripts/map45.py --preds runs/ped_predictions/labels --labels dataset/prepared/labels/val
-    python scripts/map45.py --weights runs/ped_baseline/weights/best.pt --split val
-    python scripts/map45.py ... --report-json runs/map45_baseline.json
+    python scripts/eval_map.py --preds runs/preds/labels --labels dataset/raw/train/labels
+    python scripts/eval_map.py --weights runs/ped_baseline/weights/best.pt --split val
+    python scripts/eval_map.py --weights ... --iou 0.75     # stricter localisation
+    python scripts/eval_map.py ... --report-json runs/metric_baseline.json
 """
 
 from __future__ import annotations
@@ -159,7 +165,8 @@ def run_model(weights: Path, img_dir: Path, sizes: dict[str, tuple[int, int]], i
     return out
 
 
-def sweep(weights: Path, img_dir: Path, gt: dict, sizes, imgsz: int, devicestr: str | None, thresholds: list[float]) -> list[tuple[float, float]]:
+def sweep(weights: Path, img_dir: Path, gt: dict, sizes, imgsz: int, devicestr: str | None,
+          thresholds: list[float], iou: float = 0.50) -> list[tuple[float, float]]:
     """Single inference pass at the lowest threshold, then re-threshold for free.
     This is how you find the submission confidence without N re-runs."""
     from ultralytics import YOLO
@@ -183,9 +190,11 @@ def sweep(weights: Path, img_dir: Path, gt: dict, sizes, imgsz: int, devicestr: 
                     x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
                     kept.append(PredBox(cls=int(b.cls.item()), xyxy=np.array([x1, y1, x2, y2]), conf=float(b.conf.item())))
             preds[stem] = kept
-        card = score(gt, preds, iou_threshold=0.45, class_names={i: n for i, n in enumerate(CLASS_NAMES)}, conf_steps=0)
+        card = score(gt, preds, iou_threshold=iou, class_names={i: n for i, n in enumerate(CLASS_NAMES)}, conf_steps=0)
         curve.append((thr, card.map))
-        print(f"  conf>={thr:<5} mAP@45={card.map:.4f}  preds={card.n_pred}")
+        # Label the row with the threshold actually used, not a hardcoded one: a sweep
+        # printed as "mAP@45" while matching at 0.50 is how a wrong number gets quoted.
+        print(f"  conf>={thr:<5} mAP@{iou:g}={card.map:.4f}  preds={card.n_pred}")
     return curve
 
 
@@ -199,7 +208,9 @@ def main() -> int:
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--conf", type=float, default=0.01, help="inference floor; sweep on top of it")
     ap.add_argument("--device", default=None)
-    ap.add_argument("--iou", type=float, default=0.45, help="0.45 is the competition metric")
+    ap.add_argument("--iou", type=float, default=0.50,
+                    help="IoU threshold for a match; 0.50 is the official competition metric. "
+                         "Use 0.75 to require tighter boxes, 0.45 for a more forgiving read.")
     ap.add_argument("--sweep", action="store_true", help="sweep confidence thresholds (models only)")
     ap.add_argument("--report-json", default=None)
     ap.add_argument("--dump-preds", default=None, help="write model output as YOLO txt here (for validate/submission)")
@@ -246,9 +257,9 @@ def main() -> int:
         print("\n(run with --weights --sweep to measure the best submission confidence)")
     if args.sweep and args.weights:
         print("\n=== confidence sweep (single inference pass, re-thresholded) ===")
-        curve = sweep(weights, img_dir, gt, sizes, args.imgsz, args.device, [0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7])
+        curve = sweep(weights, img_dir, gt, sizes, args.imgsz, args.device, [0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7], args.iou)
         swept_conf, swept_map = max(curve, key=lambda t: t[1])
-        print(f"\nSUBMIT AT conf≈{swept_conf:g} (validation mAP@45 {swept_map:.4f}); pass that to submit.py --conf")
+        print(f"\nSUBMIT AT conf≈{swept_conf:g} (validation mAP@{args.iou:g} {swept_map:.4f}); pass that to submit.py --conf")
         card.conf_curve = [(t, a) for t, a in curve]
         best_conf, best_map = swept_conf, swept_map
 

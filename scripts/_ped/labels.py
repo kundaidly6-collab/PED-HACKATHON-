@@ -397,7 +397,7 @@ class DatasetStats:
 
     def suggest_imgsz(self) -> tuple[int, str]:
         """Pick a defensible input resolution from the *small* end of the target
-        distribution, not the median: mAP@45 is usually lost on the minority class
+        distribution, not the median: mAP@50 is usually lost on the minority class
         (here: the tiny holes), and 640 is only right if it keeps those visible.
         """
         if not self.heights_px:

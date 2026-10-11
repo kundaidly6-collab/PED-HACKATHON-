@@ -21,8 +21,8 @@ opencv-python-headless
 # and every other script in the project runs fully offline.
 kagglehub
 
-# Optional: only if you want to compare your mAP@45 against pycocotools.
-# scripts/map45.py reimplements AP itself and needs nothing extra.
+# Optional: only if you want to compare your mAP@50 against pycocotools.
+# scripts/eval_map.py reimplements AP itself and needs nothing extra.
 # pycocotools
 
 # GPU NOTE: `pip install ultralytics` does NOT guarantee GPU support. The torch wheel

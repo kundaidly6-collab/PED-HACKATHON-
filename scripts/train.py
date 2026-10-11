@@ -142,7 +142,7 @@ def resolve_model(model_name: str, from_scratch: bool, verbose: bool = True) -> 
         return yml, (
             "training from scratch (architecture YAML): no pretrained features, so this "
             "needs many more images and epochs. Fine to validate the pipeline; not the "
-            "way to win mAP@45."
+            "way to win mAP@50."
         )
     if Path(model_name).suffix == ".pt" and not Path(model_name).is_file():
         ok, why = weights_reachable(Path(model_name).name)

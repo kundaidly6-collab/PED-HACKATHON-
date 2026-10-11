@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Phase 4 — Ultralytics validation (mAP@50, mAP@50:95, curves, plots) for context.
 
-The scored number is mAP@45 and that is NOT what this prints — run scripts/map45.py
-for it. This script exists for the *diagnosis*: PR curves, per-class AP, and the
-confusion matrix, which tell you whether you are losing points on missed welds,
-missed holes, or localization error.
+The scored number is mAP@50 (see scripts/eval_map.py) and that is NOT what this prints.
+This script exists for the *diagnosis*: PR curves, per-class AP, and the confusion
+matrix, which tell you whether you are losing points on missed spots, missed holes, or
+localisation error.
 
     python scripts/evaluate.py --name ped_baseline
     python scripts/evaluate.py --weights runs/ped_1024/weights/best.pt --imgsz 1024
@@ -32,7 +32,8 @@ def main() -> int:
     ap.add_argument("--split", default="val")
     ap.add_argument("--device", default=None)
     ap.add_argument("--conf", type=float, default=0.01, help="low floor; the sweep decides the submit threshold")
-    ap.add_argument("--skip-map45", action="store_true")
+    ap.add_argument("--iou", type=float, default=0.50, help="evaluation IoU threshold (official: 0.50)")
+    ap.add_argument("--skip-metric", action="store_true", help="skip the competition-metric run")
     args = ap.parse_args()
 
     weights = Path(args.weights) if args.weights else ROOT / "runs" / args.name / "weights" / "best.pt"
@@ -71,8 +72,8 @@ def main() -> int:
     print("  large gap  → boxes are found but sloppy: raise imgsz, check aspect ratio, more scale aug")
     print("  low mAP50  → detections are missing: that is a data/labels/recall problem, not a box problem")
 
-    if not args.skip_map45:
-        print("\n=== mAP@45 (the metric you are scored on) ===")
+    if not args.skip_metric:
+        print(f"\n=== mAP@{args.iou:g} (the metric you are scored on) ===")
         sys.path.insert(0, str(ROOT / "scripts"))
         from _ped.dataset_cfg import resolve_split_dirs
 
@@ -87,21 +88,22 @@ def main() -> int:
             return 0
         cmd = [
             sys.executable,
-            str(ROOT / "scripts" / "map45.py"),
+            str(ROOT / "scripts" / "eval_map.py"),
             "--weights", str(weights),
             "--imgsz", str(args.imgsz),
+            "--iou", str(args.iou),
             "--labels", str(lbl_dir),
             "--images", str(img_dir),
             "--sweep",
-            "--report-json", str(ROOT / "runs" / f"{args.name}_map45.json"),
+            "--report-json", str(ROOT / "runs" / f"{args.name}_metric.json"),
         ]
         if args.device:
             cmd += ["--device", args.device]
         rc = subprocess.call(cmd)
-        rep = ROOT / "runs" / f"{args.name}_map45.json"
+        rep = ROOT / "runs" / f"{args.name}_metric.json"
         if rep.is_file():
             data = json.loads(rep.read_text(encoding="utf-8"))
-            print(f"\nHEADLINE mAP@45 = {data['map']:.4f}   best conf = {data.get('best_conf')}")
+            print(f"\nHEADLINE mAP@{args.iou:g} = {data['map']:.4f}   best conf = {data.get('best_conf')}")
         return rc
     return 0
 

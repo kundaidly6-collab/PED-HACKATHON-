@@ -160,7 +160,7 @@ def main() -> int:
     ap.add_argument("--format", default="yolo", choices=["yolo", "kaggle", "coco", "csv", "xml"])
     ap.add_argument("--out", default=None, help="output file or directory (default: runs/submission_<format>)")
     ap.add_argument("--imgsz", type=int, default=640)
-    ap.add_argument("--conf", type=float, default=0.25, help="use the value map45.py --sweep recommended")
+    ap.add_argument("--conf", type=float, default=0.25, help="use the value eval_map.py --sweep recommended")
     ap.add_argument("--iou", type=float, default=0.45, help="NMS IoU (not the eval threshold)")
     ap.add_argument("--max-det", type=int, default=1000, help="raise if a frame has many welds")
     ap.add_argument("--tile", type=int, default=0, help="tiled inference for large images (see predict.py)")
