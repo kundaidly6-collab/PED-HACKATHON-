@@ -23,6 +23,10 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
 import sys
 import tempfile
 from pathlib import Path
@@ -332,7 +336,81 @@ def test_annotation_stack() -> None:
         check("an image with no boxes writes an empty file, not a malformed one",
               f.read_text() == "" and annotate.load_yolo(f) == [])
 
-    # 4. save routing: never guess which image a request means
+    # 4. the real HTTP surface. Everything above tests the pieces; this starts the
+    #    actual server and talks to it, because the failures that matter here (a proxy
+    #    probing with HEAD, a route that 500s on an odd path) only exist over HTTP.
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        (td / "imgs").mkdir()
+        (td / "labels").mkdir()
+        (td / "drafts").mkdir()
+        # a 1x1 PNG so /img/0 has something real to serve
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082")
+        (td / "imgs" / "p1.png").write_bytes(png)
+        (td / "drafts" / "p1.txt").write_text("1 0.5 0.5 0.2 0.2\n")
+        (td / "drafts" / "notes.json").write_text(json.dumps(
+            [{"stem": "p1", "boxes": [{"note": "Nut/Hole or weld/Spot? you decide"}]}]))
+
+        saved = dict(annotate.STATE)
+        annotate.STATE.update({
+            "images": [{"path": str(td / "imgs" / "p1.png"), "name": "p1.png", "n": 1, "reviewed": False}],
+            "labels_dir": str(td / "labels"), "drafts_dir": str(td / "drafts"),
+            "notes": {"p1": {0: "Nut/Hole or weld/Spot? you decide"}},
+            "mime": {".png": "image/png"},
+        })
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), annotate.Handler)
+        port = srv.server_address[1]
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+
+        def req(path, method="GET", body=None):
+            r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method)
+            payload = None
+            if body is not None:
+                payload = json.dumps(body).encode()
+                r.add_header("Content-Type", "application/json")
+            try:
+                with urllib.request.urlopen(r, payload, timeout=5) as resp:
+                    return resp.status, resp.read()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read()
+
+        try:
+            code, body = req("/", "HEAD")
+            check("the server answers HEAD (proxies probe with it; a 501 looks like a dead server)",
+                  code == 200 and body == b"", f"got {code} with {len(body)} bytes")
+            code, body = req("/")
+            check("the page is served", code == 200 and b"<canvas" in body, f"got {code}")
+            code, body = req("/api/state")
+            st = json.loads(body)
+            check("the state endpoint reports both classes, in id order",
+                  st["classes"] == ["Spot", "Hole"], f"got {st.get('classes')}")
+            code, body = req("/img/0")
+            check("images are served with an image content-type", code == 200 and body[:8] == png[:8], f"got {code}")
+            code, body = req("/api/boxes/0")
+            served = json.loads(body)
+            check("drafts reach the browser with their review notes attached",
+                  served["source"] == "draft" and "?" in served["boxes"][0]["note"],
+                  f"got {served}")
+            code, body = req("/api/save", "POST", {"i": 0, "boxes": [{"c": 1, "x": .5, "y": .5, "w": .2, "h": .2}]})
+            check("a valid save returns ok and names the file it wrote",
+                  json.loads(body).get("ok") is True, f"got {body[:120]}")
+            check("the saved file is on disk and parses",
+                  annotate.load_yolo(td / "labels" / "p1.txt")[0]["c"] == 1)
+            code, body = req("/api/save", "POST", {"i": 7, "boxes": []})
+            check("a bad index is refused over HTTP with a readable error",
+                  code == 400 and json.loads(body).get("ok") is False, f"got {code} {body[:120]}")
+            code, _ = req("/nope")
+            check("an unknown path is a 404, not a hang or a 500", code == 404, f"got {code}")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            annotate.STATE.clear()
+            annotate.STATE.update(saved)
+
+    # 5. save routing: never guess which image a request means
     images = [{"path": "/tmp/a/part01.png"}, {"path": "/tmp/a/part02.png"}]
     check("save by index resolves", annotate.resolve_image(images, {"i": 1})["path"].endswith("part02.png"))
     check("save by filename resolves", annotate.resolve_image(images, {"key": "part01.png"})["path"].endswith("part01.png"))
@@ -344,9 +422,13 @@ def test_annotation_stack() -> None:
         except ValueError:
             check(f"a save request with {why} is REFUSED", True)
 
-    # 5. the class ids the UI writes must be the ones the competition names
+    # 6. the class ids the UI writes must be the ones the competition names
     check("annotation classes are 0=Spot and 1=Hole, matching the competition",
-          annotate.CLASS_NAMES == {0: "Spot", 1: "Hole"}, f"got {annotate.CLASS_NAMES}")
+          list(annotate.CLASS_NAMES) == ["Spot", "Hole"], f"got {annotate.CLASS_NAMES}")
+    from _ped.labels import CLASS_NAMES as CANONICAL_NAMES
+    check("the UI shares the canonical mapping instead of keeping its own copy",
+          annotate.CLASS_NAMES is CANONICAL_NAMES,
+          "annotate.py has drifted from _ped.labels — a class order free to diverge")
 
 
 # --------------------------------------------------------------- submission class mapping

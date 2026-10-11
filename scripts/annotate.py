@@ -33,7 +33,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ROOT = Path(__file__).resolve().parents[1]
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
-CLASS_NAMES = {0: "Spot", 1: "Hole"}
+
+# The class mapping lives in ONE place: _ped/labels.py, which is stdlib-only, so this
+# server stays dependency-free. A second copy here would be a mapping that can silently
+# drift from the one the labels and data.yaml are written with.
+from _ped.labels import CLASS_NAMES  # noqa: E402
 
 STATE: dict = {"images": [], "labels_dir": None, "drafts_dir": None, "mime": {}}
 
@@ -369,35 +373,55 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code: int = 200) -> None:
         self._send(code, json.dumps(obj).encode(), "application/json")
 
-    def do_GET(self) -> None:  # noqa: N802
+    def _get_response(self) -> tuple[int, bytes, str]:
+        """Resolve a GET into (status, body, content-type).
+
+        Split out from do_GET so HEAD can answer with the exact same headers and no
+        body. A 501 on HEAD is what this looks like from the outside: a proxy or
+        uptime check probes the URL, is told the method is unsupported, and reports a
+        perfectly healthy server as dead.
+        """
         u = urlparse(self.path)
         if u.path in ("/", "/index.html"):
-            return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+            return 200, PAGE.encode(), "text/html; charset=utf-8"
         if u.path == "/api/state":
-            return self._json({"images": STATE["images"], "classes": CLASS_NAMES})
+            return 200, json.dumps({"images": STATE["images"], "classes": CLASS_NAMES}).encode(), "application/json"
         if u.path.startswith("/img/"):
             try:
                 k = int(u.path.rsplit("/", 1)[1])
                 p = Path(STATE["images"][k]["path"])
             except (ValueError, IndexError):
-                return self._send(404, b"no such image", "text/plain")
+                return 404, b"no such image", "text/plain"
             if not p.is_file():
-                return self._send(404, b"missing", "text/plain")
-            return self._send(200, p.read_bytes(), STATE["mime"].get(p.suffix.lower(), "image/jpeg"))
+                return 404, b"missing", "text/plain"
+            return 200, p.read_bytes(), STATE["mime"].get(p.suffix.lower(), "image/jpeg")
         if u.path.startswith("/api/boxes/"):
             try:
                 k = int(u.path.rsplit("/", 1)[1])
                 p = Path(STATE["images"][k]["path"])
             except (ValueError, IndexError):
-                return self._json({"boxes": []}, 404)
+                return 404, json.dumps({"boxes": []}).encode(), "application/json"
             draft = load_yolo(Path(STATE["drafts_dir"]) / f"{p.stem}.txt") if STATE["drafts_dir"] else []
             final = load_yolo(Path(STATE["labels_dir"]) / f"{p.stem}.txt")
             notes = STATE["notes"].get(p.stem, {})
             for idx, b in enumerate(draft):
                 b["note"] = notes.get(idx, "")
-            return self._json({"boxes": final if final else draft,
+            body = json.dumps({"boxes": final if final else draft,
                                "source": "saved" if final else ("draft" if draft else "empty")})
-        self._send(404, b"not found", "text/plain")
+            return 200, body.encode(), "application/json"
+        return 404, b"not found", "text/plain"
+
+    def do_GET(self) -> None:  # noqa: N802
+        code, body, ctype = self._get_response()
+        self._send(code, body, ctype)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        code, body, ctype = self._get_response()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802
         u = urlparse(self.path)
