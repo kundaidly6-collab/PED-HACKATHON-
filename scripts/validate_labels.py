@@ -118,6 +118,43 @@ def make_sheet(prepared: Path, split: str, n: int, out: Path, seed: int = 7) -> 
     return out
 
 
+def check_class_names() -> list[str]:
+    """Does the dataset yaml name the classes in the SAME order the labels imply?
+
+    This is the quietest way to lose the whole competition. Every label file holds bare
+    integers (0 = Spot, 1 = Hole in this repo). A yaml that declares the names in the
+    other order -- ``names: ["Hole", "Spot"]``, which is what a lot of outside tutorials
+    and starter scripts use -- renames every box without touching a single label file.
+    The model then learns Hole features as Spot and vice versa, the training curves look
+    healthy, and validation mAP looks plausible, because the metric is computed against
+    the same swapped interpretation. Nothing shows it except comparing the two lists.
+    """
+    try:
+        from _ped.dataset_cfg import find_data_yaml, load_yaml
+    except Exception:
+        return []
+    yml = find_data_yaml(ROOT)
+    if not yml:
+        return []
+    try:
+        cfg = load_yaml(yml)
+    except Exception as exc:
+        return [f"{yml.name} could not be parsed: {exc}"]
+    names = cfg.get("names")
+    if names is None:
+        return [f"{yml.name} has no 'names:' list, so the class order is undefined"]
+    if isinstance(names, dict):                       # {0: 'Spot', 1: 'Hole'} is legal YAML
+        names = [names[k] for k in sorted(names)]
+    if [str(n) for n in names] != list(CLASS_NAMES):
+        return [
+            f"{yml.name} declares names {list(names)}, but the labels use "
+            f"{list(CLASS_NAMES)} (0={CLASS_NAMES[0]}, 1={CLASS_NAMES[1]}). "
+            f"Every class would be read as the OPPOSITE one. Fix the yaml or the labels — "
+            f"do not train until they agree."
+        ]
+    return []
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--prepared", default=str(PREPARED))
@@ -135,8 +172,14 @@ def main() -> int:
     if (prepared / "manifest.json").is_file():
         manifest = json.loads((prepared / "manifest.json").read_text(encoding="utf-8"))
 
+    names_problems = check_class_names()
+    if names_problems:
+        print("=== class names vs labels ===")
+        for prob in names_problems:
+            print(f"  [FAIL] {prob}")
+
     splits = ["train", "val"] if args.split == "both" else [args.split]
-    total = 0
+    total = len(names_problems)
     for split in splits:
         n_boxes, counts, problems = check_split(prepared, split)
         print(f"\n=== {split} ===")

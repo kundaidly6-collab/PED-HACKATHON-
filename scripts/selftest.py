@@ -595,6 +595,48 @@ def test_submission_file_format() -> None:
         check("a duplicated ID is rejected", any("more than once" in e for e in e5), f"got {e5[:2]}")
 
 
+# --------------------------------------------------------------- class name order
+
+def test_class_name_order_guard() -> None:
+    """The quietest total failure: a dataset yaml that names the classes in the other order.
+
+    Every label holds bare integers. A yaml saying names: ["Hole","Spot"] renames every
+    box without touching a label file, so the model learns the classes swapped, the loss
+    curves look healthy, and validation mAP is computed against the same swapped reading.
+    Nothing surfaces it but comparing the two lists.
+    """
+    print("\n= class names in the dataset yaml must match the ids in the labels =")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "vl_probe", Path(__file__).resolve().parent / "validate_labels.py")
+    vl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vl)
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        (td / "configs").mkdir()
+        yml = td / "configs" / "data.prepared.yaml"
+        vl.ROOT = td
+
+        yml.write_text('path: .\nnames: ["Spot", "Hole"]\n', encoding="utf-8")
+        check("the repo's own order passes", not vl.check_class_names(), f"got {vl.check_class_names()}")
+
+        yml.write_text('path: .\nnames: ["Hole", "Spot"]\n', encoding="utf-8")
+        got = vl.check_class_names()
+        check("a reversed name list is CAUGHT (it renames every label silently)",
+              bool(got) and "OPPOSITE" in got[0], f"got {got}")
+
+        yml.write_text('path: .\nnames:\n  0: Spot\n  1: Hole\n', encoding="utf-8")
+        check("the dict form of names is handled the same way",
+              not vl.check_class_names(), f"got {vl.check_class_names()}")
+
+        yml.write_text("path: .\n", encoding="utf-8")
+        got = vl.check_class_names()
+        check("a yaml with no names list is flagged as undefined, not assumed",
+              bool(got), f"got {got}")
+
+
 # --------------------------------------------------------------- roundtrip
 
 def test_roundtrip() -> None:
@@ -786,6 +828,7 @@ def main() -> int:
     test_annotation_stack()
     test_submission_class_mapping()
     test_submission_file_format()
+    test_class_name_order_guard()
     test_end_to_end_build()
     test_dataset_config_resolution()
     test_kaggle_reference_parsing()

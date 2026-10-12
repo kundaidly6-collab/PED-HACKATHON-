@@ -104,6 +104,13 @@ def main() -> int:
         if rep.is_file():
             data = json.loads(rep.read_text(encoding="utf-8"))
             print(f"\nHEADLINE mAP@{args.iou:g} = {data['map']:.4f}   best conf = {data.get('best_conf')}")
+            # The rules name the metric "mAP@50" and define the match at IoU 0.45, so both
+            # numbers are real. Print the pair: a headline that shows one invites quoting it
+            # as "the" score when the grader may be using the other.
+            twin = data.get("map_at_other_reading")
+            if twin is not None:
+                other = 0.45 if abs(args.iou - 0.50) < 1e-9 else 0.50
+                print(f"         mAP@{other:g} = {twin:.4f}   (the rules give both thresholds — see README)")
         return rc
     return 0
 
