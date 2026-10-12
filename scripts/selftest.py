@@ -637,6 +637,71 @@ def test_class_name_order_guard() -> None:
               bool(got), f"got {got}")
 
 
+# --------------------------------------------------------------- entry point
+
+def test_single_entry_point() -> None:
+    """ped.py is the one file a team runs, so its wiring is checked like code.
+
+    It delegates rather than reimplements, which is the right call — but delegation can
+    rot silently: a renamed stage script, a stage advertised in the docs and missing from
+    the table, or a plan whose order no longer matches the pipeline. None of that raises
+    an error until somebody is mid-deadline and types the command.
+    """
+    print("\n= ped.py: one entry point for the whole pipeline =")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "ped_probe", Path(__file__).resolve().parents[1] / "ped.py")
+    ped = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ped)
+
+    scripts_dir = Path(__file__).resolve().parent
+    missing = [f"{name} -> {info['script']}" for name, info in ped.STAGES.items()
+               if info["script"] and not (scripts_dir / info["script"]).is_file()]
+    check("every stage points at a script that exists", not missing, f"broken: {missing}")
+
+    # every pipeline script should be reachable from the entry point, or it is a stage
+    # nobody will ever find
+    on_disk = {f.name for f in scripts_dir.glob("*.py")}
+    referenced = {info["script"] for info in ped.STAGES.values() if info["script"]}
+    orphans = sorted(on_disk - referenced - {"__init__.py"})
+    check("no pipeline script is left unreachable", not orphans, f"unreachable: {orphans}")
+
+    check("the `all` plan only names real stages",
+          all(st in ped.STAGES for st in ped.ALL_PLAN), f"got {ped.ALL_PLAN}")
+    check("the `all` plan is in pipeline order (audit before prepare, submit before check)",
+          ped.ALL_PLAN.index("audit") < ped.ALL_PLAN.index("prepare")
+          < ped.ALL_PLAN.index("train") < ped.ALL_PLAN.index("submit")
+          < ped.ALL_PLAN.index("check"), f"got {ped.ALL_PLAN}")
+    check("the plan never automates the human annotation step",
+          "annotate" not in ped.ALL_PLAN and "propose" not in ped.ALL_PLAN,
+          f"got {ped.ALL_PLAN}")
+
+    # the class mapping must exist in exactly one place; the entry point may import it,
+    # never restate it
+    check("ped.py does not carry its own copy of the class mapping",
+          "CLASS_NAMES" not in Path(ped.__file__).read_text(encoding="utf-8")
+          or "from _ped" in Path(ped.__file__).read_text(encoding="utf-8"),
+          "the entry point appears to define classes itself")
+
+    # dispatch behaviour. These run the real commands, so their output is swallowed:
+    # a test suite that prints a pipeline map in the middle of its own results is a test
+    # suite nobody reads.
+    import contextlib
+    import io
+
+    def quiet(*argv) -> int:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            return ped.main(list(argv))
+
+    check("an unknown stage is refused, non-zero", quiet("definitely-not-a-stage") != 0)
+    check("`steps` runs and exits 0", quiet("steps") == 0)
+    check("`doctor` reports readiness (0 = ready, 1 = blockers)",
+          quiet("doctor") in (0, 1), "doctor returned an unexpected exit code")
+    check("`all --dry-run` executes nothing and exits 0", quiet("all", "--dry-run") == 0)
+
+
 # --------------------------------------------------------------- roundtrip
 
 def test_roundtrip() -> None:
@@ -829,6 +894,7 @@ def main() -> int:
     test_submission_class_mapping()
     test_submission_file_format()
     test_class_name_order_guard()
+    test_single_entry_point()
     test_end_to_end_build()
     test_dataset_config_resolution()
     test_kaggle_reference_parsing()

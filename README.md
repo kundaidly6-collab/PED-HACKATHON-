@@ -109,6 +109,48 @@ leaderboard scores, rather than discovering it at the end.
 
 ---
 
+## 0. Run it — one file
+
+Everything this project does is reachable from **`ped.py`**, one file at the repository
+root. You do not need to remember sixteen script names, and you do not need to run them
+in the right order by hand:
+
+```bash
+python ped.py doctor           # is this machine and this data ready? and what next?
+python ped.py steps            # the whole pipeline in order, and who does which step
+python ped.py all              # every automated stage, end to end, stopping on first failure
+
+python ped.py <stage> [args]   # one stage, arguments passed straight through
+python ped.py metric --help    # a stage's own options, unchanged
+```
+
+| command | what it is for |
+|---|---|
+| `doctor` | environment + data report: dependencies, GPU, what is in `dataset/raw`, and the exact next command. Exit code 0 = ready, 1 = blocked |
+| `steps` | the pipeline map, plus where this project currently stands |
+| `all` | `audit → prepare → labels → train → select → evaluate → submit → check`, stopping on the first failure |
+| `<stage>` | any single stage: `fetch audit recon propose annotate prepare labels train select evaluate metric predict submit check` |
+
+`all` is re-runnable and refuses to do the wrong thing: it stops and tells you what to do
+if the data is missing, **stops before training if the images have no annotations yet**
+(they ship unlabelled — that step is yours), skips `prepare` when the split already exists
+(`--rebuild` regenerates it), and skips `submit`/`check` with a note rather than an
+argparse error when nothing has been trained yet.
+
+### Why `ped.py` delegates instead of containing everything
+
+The stages are ~5,000 lines of tested code under `scripts/`. Folding them into one file
+would create a **second copy** of rules like the class mapping, the metric's IoU
+threshold, or the split logic — and two copies drift. This repository has already been
+bitten by exactly that: the scorer defaulted to IoU 0.45 while every command line passed
+0.50, so the CLIs looked right and any direct caller was silently wrong. So there is one
+implementation of each rule, and `ped.py` owns what is genuinely missing when you have
+sixteen scripts and one deadline: **the order, and the checks between the stages.**
+`scripts/selftest.py` asserts that every stage points at a real script, that the plan is
+in pipeline order, and that no stage is left unreachable.
+
+---
+
 ## 1. The project in one page
 
 ### The problem
@@ -229,6 +271,10 @@ python scripts/audit_dataset.py
 ---
 
 ## 3. End-to-end workflow
+
+The short version: `python ped.py all`. The long version below is what `all` does, with
+the options you will eventually want (a different `--imgsz`, a specific checkpoint, a
+hand-tuned confidence threshold), and the reasons each step exists.
 
 ```bash
 # 0 — environment
@@ -413,8 +459,9 @@ dataset/raw/                      originals — every script treats this as read
 dataset/prepared/                 canonical YOLO output + manifest.json (seed, groups, per-split counts)
 docs/metric_guide.md              what mAP@50 is, in detail
 docs/recon_findings.md            what the first real component looks like, measured
+ped.py                            THE ENTRY POINT — run this; see §0
 scripts/_ped/                     discovery, label parsing, dataset config, hardware planning, metrics, split
-scripts/*.py                      the pipeline, listed in §3
+scripts/*.py                      the pipeline stages, listed in §3
 runs/                             training runs, plots, reports, submissions (gitignored)
 ```
 
