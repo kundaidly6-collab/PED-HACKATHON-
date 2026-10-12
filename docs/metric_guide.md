@@ -7,9 +7,20 @@ You train by minimising a loss, then you *measure* mAP@50 on held-out images to 
 which model to submit and at what confidence threshold. Those are different jobs and it
 matters that they stay separate.
 
-**@50 is the competition's number.** Every default in this repo is 0.50. Other thresholds
-(0.45, 0.75) are available through `--iou` as diagnostics, and the scorer always prints
-which one it used — a number quoted without its threshold is meaningless.
+**Read this first: the competition's own text is self-contradictory about the threshold.**
+
+> "Submissions are evaluated using **mAP@50 (mean Average Precision at IoU 0.45)**."
+
+The name and the definition disagree. Matching is a step function, so this is not a
+rounding difference: a single prediction at IoU 0.4925 scores **0.0000 at 0.50** and
+**1.0000 at 0.45** — same box, same confidence, opposite verdict. Every report from
+`eval_map.py` therefore prints **both** readings, and `--iou` (default 0.50, the
+stricter) can produce either.
+
+Why default to the stricter one: AP at 0.45 is never *lower* than AP at 0.50, because a
+box that matches at 0.50 also matches at 0.45. Tuning against 0.50 is therefore safe
+under both readings — the optimistic reading can only add score, never remove it. But
+**ask the organizers**, and until they answer, quote both numbers rather than one.
 
 ## What "mAP" means, built up one piece at a time
 
@@ -101,7 +112,7 @@ minority class is the lever, not box tightness.**
 | `best.pt` selection | **not by default** | same fitness; `scripts/select_best.py` fixes this |
 | model comparison | **yes** | `scripts/eval_map.py` — same metric for every experiment |
 | confidence threshold | **yes** | the sweep picks the threshold that maximises mAP@50 on validation |
-| submission | **yes, indirectly** | you submit boxes; their mAP@50 is your score |
+| submission | **yes, indirectly** | you submit boxes; the grader's mAP@50-or-@45 is your score |
 
 ## The trap: Ultralytics' "best.pt" is not chosen by this metric
 

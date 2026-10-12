@@ -27,19 +27,85 @@ suggests — **a nut is a `Hole`, and a bolt is a `Spot`**:
 
 There is **no `Punch` class** and no third class. Everything in this repo uses those two.
 
-The test-set annotations are hidden and submissions are scored automatically with
-**mAP@50**. Note what the rules do *not* say: they fix the class **names** and never
-state a numeric ordering. "`Spot`=0, `Hole`=1" is **this repo's** convention — consistent
-across `data.yaml`, the labels, the annotator and the trainer, which is all training
-needs. For a submission it is an assumption, so `submit.py` refuses to leave it implicit:
-it prints the mapping it used, emits a legend (`classes.txt` / `submission_classes.txt`)
-beside every id-only format, and can flip the order with `--class-order hole-first` if
-the organizers' reader expects the other one. Getting this wrong misclassifies every box,
-so it is the first thing worth confirming with the organizers.
+The test-set annotations are hidden and submissions are scored automatically. Two
+sentences in the rules decide how you are scored, and both are worth reading twice
+because they disagree with each other and with the obvious reading.
+
+### The metric sentence contradicts itself
+
+> "Submissions are evaluated using **mAP@50 (mean Average Precision at IoU 0.45)**."
+> "The Intersection over Union (IoU) ... is at least **0.45**."
+
+The name says 50. The definition says 0.45. Matching is a **step function**, not a
+slope, so the gap is not cosmetic — measured on this repo's own scorer, one prediction
+at IoU 0.4925 scores:
+
+```
+IoU >= 0.50 : mAP 0.0000
+IoU >= 0.45 : mAP 1.0000
+```
+
+Same boxes, same confidence, opposite conclusion. So `eval_map.py` **reports both
+readings from a single run** and `--iou` stays a first-class parameter (default 0.50,
+the stricter one). Tuning against the stricter threshold is safe under either reading,
+because AP at 0.45 is never *lower* than AP at 0.50 — the 0.45 number is the optimistic
+end of a range, never a surprise. This is the single best question to put to the
+organizers; until it is answered, quote both numbers, never one.
+
+### The submission carries class NAMES, so the id order cannot hurt you
+
+The rules fix the class **names** (`Hole`, `Spot`) and never publish a numeric order.
+`Spot`=0, `Hole`=1 is **this repo's** convention — consistent across `data.yaml`, the
+labels, the annotator and the trainer, which is all training needs. And because the
+submission format carries the class as a **string** (`"class":"Hole"`), that internal
+convention cannot leak into the scored file. `submit.py` still prints the mapping it
+uses and can emit a legend or flip the order (`--class-order hole-first`) for the
+auxiliary id-based exports, but for the real submission this risk is retired.
 
 **Team entries** (nothing in this repo can do it for you): 2–5 members per team, at least
 one Section Head, each member joins the competition with their own Kaggle account and
 accepts the team invitation, and a participant may belong to only one team.
+
+### The submission file, exactly
+
+One CSV, two columns, predictions as a JSON list per image:
+
+```
+ID,predictions
+image001.jpg,"[{""class"":""Hole"",""xcenter"":0.52,""ycenter"":0.43,""width"":0.18,""height"":0.21,""confidence"":0.91}]"
+image_003.jpg,"[]"
+```
+
+| rule | how this repo honours it |
+|---|---|
+| exactly two columns, `ID` and `predictions` | `--format ped` (the default) writes only this |
+| ID = the **exact** test filename | the ID is taken from the file on disk, extension included |
+| every test image exactly once | `--test-images <folder>` drives the rows, so coverage is total |
+| no detections → `[]` | empty images are written as `[]`, never omitted |
+| class is `Hole` or `Spot` | the class **name** is written, never the numeric id |
+| coords normalized 0–1 | converted back from each image's own pixel size |
+| width, height **not zero** | a box that rounds to zero is dropped and counted |
+| confidence 0–1 | clamped, and validated |
+
+```bash
+python scripts/submit.py --weights runs/ped_baseline/weights/best_metric.pt     --source dataset/raw/test/images --test-images dataset/raw/test/images     --out runs/submission.csv
+python scripts/validate_submission.py --csv runs/submission.csv     --test-images dataset/raw/test/images     # exit 0 only if a grader would accept it
+```
+
+`validate_submission.py` checks every rule above and refuses the file otherwise: a
+missing image row, a JSON field that was never quoted (so the commas split the row into
+seven columns), `"hole"` in the wrong case, a class given as a training id, a width of
+zero, pixel coordinates where normalized ones belong, a confidence of 1.4, a duplicated
+ID, the wrong header, a box hanging off the edge (legal, but flagged). Each of those
+scores zero, and none of them is visible by looking at the file.
+
+**One ambiguity remains in the JSON keys.** The field list says `x_center` / `y_center`;
+the worked example and the sentence *"xcenter and ycenter represent the center"* say the
+plain form. `--keys plain` (default) or `--keys underscore` picks one, and the validator
+reports which style a file uses. Whichever you choose, confirm it before the deadline —
+a strict reader keying on the other spelling would find no coordinates at all. A cheap
+way to settle both this and the metric question: submit one of each early and compare
+leaderboard scores, rather than discovering it at the end.
 
 ---
 
@@ -189,9 +255,13 @@ python scripts/train.py                            # baseline run
 python scripts/select_best.py --run ped_baseline    # pick the checkpoint by mAP@50, not mAP@50:95
 python scripts/evaluate.py --name ped_baseline      # Ultralytics metrics + the real mAP@50 + sweep
 
-# 6 — submit
+# 6 — submit in the organizers' format, then validate it
 python scripts/submit.py --weights runs/ped_baseline/weights/best_metric.pt \
-                         --source <test images> --format <organizer format> --conf <swept value>
+                         --source dataset/raw/test/images \
+                         --test-images dataset/raw/test/images \
+                         --conf <swept value> --out runs/submission.csv
+python scripts/validate_submission.py --csv runs/submission.csv \
+                         --test-images dataset/raw/test/images
 ```
 
 ### What each step does, and why it exists
@@ -205,8 +275,9 @@ python scripts/submit.py --weights runs/ped_baseline/weights/best_metric.pt \
 | 4 | `train.py` | batch size from **free** VRAM, image size from measured target size, model from dataset scale | OOM crashes and a default `imgsz=640` that silently destroys small targets |
 | 5 | `eval_map.py` | the competition metric itself (`--iou`, default 0.50), plus the confidence sweep | optimising mAP@50 because that is what the trainer prints |
 | 5 | `select_best.py` | which checkpoint to actually ship | submitting a checkpoint the trainer picked by the wrong metric |
-| 6 | `predict.py` / `submit.py` | tiled inference for tiny targets; five output formats in **original image pixels** | coordinates in letterboxed space, which loses the whole submission |
-| — | `selftest.py` | 53 known-answer checks on the metric, parsing, formats, split and coordinate round-trip | the silent failures that only show up as a disappointing score |
+| 6 | `predict.py` / `submit.py` | tiled inference for tiny targets; the organizers' `ID,predictions` CSV in **original image pixels**, plus auxiliary exports | coordinates in letterboxed space, which loses the whole submission |
+| 6 | `validate_submission.py` | whether a grader would accept the file at all: columns, IDs, coverage, key names, class names, ranges, `[]` rows | a zero-width box, an unquoted JSON field, or a missing image row — each of which scores zero and none of which is visible in the CSV |
+| — | `selftest.py` | 106 known-answer checks on the metric, parsing, formats, split, coordinate round-trip, the annotation stack, the class mapping and the submission file | the silent failures that only show up as a disappointing score |
 
 ---
 
@@ -323,8 +394,8 @@ next action and a wasted day.
 | 4 | leakage-safe train/val split | `prepare_dataset.py` | done — grouped by component, stratified, seeded |
 | 5 | train the baseline | `train.py` | done — config derived from the audit, recorded per run |
 | 6 | inspect predictions and per-class errors | `eval_map.py`, `evaluate.py` | done |
-| 7 | evaluate with mAP@50 | `eval_map.py`, `select_best.py` | done — own implementation, 53 unit checks, checkpoint selection corrected |
-| 8 | test the submission format | `submit.py` | done — five formats, original-pixel coordinates |
+| 7 | evaluate | `eval_map.py`, `select_best.py` | done — own implementation, both threshold readings reported, checkpoint selection corrected |
+| 8 | test the submission format | `submit.py`, `validate_submission.py` | done — the organizers' exact CSV, original-pixel coordinates, and a validator that refuses a malformed file |
 
 Verified end to end on generated data in a GPU-less sandbox (2 CPU cores, 31 training
 images, 40 epochs from scratch): `Spot 0.854 / Hole 0.000`, mean 0.4271 — measured at the

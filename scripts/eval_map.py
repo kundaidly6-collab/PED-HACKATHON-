@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """The competition metric, computed properly: mAP at a chosen IoU threshold.
 
-**The official evaluation for this hackathon is mAP@50** (``--iou 0.50``, the default).
+**The evaluation is named mAP@50 but defined at IoU 0.45 by the competition text** -- it
+says "mAP@50 (mean Average Precision at IoU 0.45)" and then "IoU ... at least 0.45". This
+script defaults to ``--iou 0.50`` (the stricter reading) and prints the same predictions
+at the other threshold too, so neither reading can surprise you. See the note printed
+with every report and the README section on the ambiguity.
 The threshold is a first-class parameter here rather than a hardcoded constant, so the
 same script covers @50, the stricter COCO-style @75, or @45 — and prints whichever it
 actually used, so a report can never be misread.
@@ -250,6 +254,25 @@ def main() -> int:
     print("\n" + card.table())
     for note in card.notes:
         print(f"  ! {note}")
+
+    # The description contradicts itself about the threshold: it CALLS the metric
+    # "mAP@50" and then defines a match as "IoU ... at least 0.45", so both readings are
+    # live. Matching is a step function, not a slope -- a box at IoU 0.493 scores 1.000 at
+    # 0.45 and 0.000 at 0.50 -- so the gap is not cosmetic. Score both and show both;
+    # AP@0.45 >= AP@0.50 always, so the higher row is the optimistic end of the range.
+    twin = 0.45 if abs(args.iou - 0.50) < 1e-9 else (0.50 if abs(args.iou - 0.45) < 1e-9 else None)
+    twin_map = None
+    if twin is not None and card.n_gt:
+        twin_map = score(gt, preds, iou_threshold=twin,
+                         class_names={i: n for i, n in enumerate(CLASS_NAMES)},
+                         conf_steps=0).map
+        print(f"\n=== the description is ambiguous, so here are BOTH readings ===")
+        print(f"  IoU >= {args.iou:g} : mAP {card.map:.4f}   (this run's --iou)")
+        print(f"  IoU >= {twin:g} : mAP {twin_map:.4f}")
+        print("  it names the metric \"mAP@50\" but defines a match at IoU 0.45, and a box")
+        print("  between the two thresholds scores in one and zero in the other. Tuning for")
+        print("  the stricter 0.50 is safe for both (AP@0.45 is never lower), but confirm")
+        print("  which one the grader uses before believing either number.")
     best_conf, best_map = best_confidence(card)
     if card.conf_curve:
         print(f"\nbest confidence threshold in sweep: {best_conf:.3f} → mAP@{args.iou:g} = {best_map:.4f}")
@@ -278,6 +301,7 @@ def main() -> int:
                 {
                     "map": card.map,
                     "iou": card.iou_threshold,
+                    "map_at_other_reading": twin_map,
                     "per_class": [s.__dict__ for s in card.per_class],
                     "conf_curve": card.conf_curve,
                     "best_conf": best_conf,

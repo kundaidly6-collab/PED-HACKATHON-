@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
-"""Phase 5 — produce the submission in the organizer's format.
+"""Phase 5 — produce the submission in the organizers' format.
 
-The exact required format is NOT known from this repo, so this script does not guess:
-pick with --format, and it prints what it wrote so you can diff it against one sample
-line from the organizers' example file. Coordinates are always converted back to each
-ORIGINAL image's own size — if the organizers score in pixels, predicting in the
+THE format is fixed by the competition and is the default here:
+
+  ped        ID,predictions as a two-column CSV, predictions a JSON list:
+             [{"class":"Hole","xcenter":0.52,"ycenter":0.43,"width":0.18,
+               "height":0.21,"confidence":0.91}]
+             IDs are the exact test filenames; an image with no detections is [].
+             Validate the file with scripts/validate_submission.py before uploading.
+
+The other formats below are auxiliary exports, not submission candidates. Coordinates
+are always converted back to each ORIGINAL image's own size — predicting in the
 letterboxed 640×640 space is a silent, total loss of score.
 
 Formats:
-  yolo       <cls> <cx> <cy> <w> <h> <conf>     normalized 0..1     (default)
-  kaggle     <cls> <conf> <x> <y> <w> <h>       pixels, top-left    (Kaggle object detection)
-  coco       one COCO JSON with images+annotations+categories       (pycocotools-compatible)
+  ped        ID,predictions (organizers' format)                        (default)
+  yolo       <cls> <cx> <cy> <w> <h> <conf>     normalized 0..1
+  kaggle     <cls> <conf> <x> <y> <w> <h>       pixels, top-left
+  coco       one COCO JSON with images+annotations+categories
   csv        <image>,<cls>,<conf>,<xmin>,<ymin>,<xmax>,<ymax>       pixels
   xml        Pascal VOC detection XML per image
 
-    python scripts/submit.py --weights runs/ped_baseline/weights/best.pt --source test/ --format kaggle
-    python scripts/submit.py --preds runs/ped_predictions/labels --format csv --out submission.csv
+    python scripts/submit.py --weights runs/ped_baseline/weights/best.pt --source dataset/test/images
+    python scripts/submit.py --preds runs/ped_predictions/labels --source dataset/test/images \
+        --out runs/submission.csv
+    python scripts/validate_submission.py --csv runs/submission.csv --test-images dataset/test/images
 """
 
 from __future__ import annotations
@@ -54,6 +63,67 @@ def read_boxes(label_dir: Path, sizes: dict[str, tuple[int, int]]) -> dict[str, 
                 x2, y2 = (cx + bw / 2) * w, (cy + bh / 2) * h
                 rows.append((x1, y1, x2, y2, conf, cls))
         out[stem] = rows
+    return out
+
+
+def write_ped(boxes, sizes, out: Path, names: list[str] | None = None,
+              ids: dict[int, int] | None = None,
+              filenames: dict[str, str] | None = None,
+              key_style: str = "plain") -> Path:
+    """The organizers' submission file: exactly two columns, ID and predictions.
+
+        ID,predictions
+        image001.jpg,"[{""class"":""Hole"",""xcenter"":0.52,""ycenter"":0.43,
+                        ""width"":0.18,""height"":0.21,""confidence"":0.91}]"
+        image_003.jpg,"[]"
+
+    Details that decide whether this scores at all:
+      * ID is the EXACT filename, extension included -- not the stem.
+      * Every test image needs a row, and an image with nothing detected must be an
+        empty list. A missing row is a missing image, not a missing detection.
+      * class travels as the NAME (Hole/Spot), so the internal numeric ids -- and the
+        order they are in -- cannot leak into the submission.
+      * width and height must be non-zero, so a box that rounds away is dropped with a
+        count rather than written as an invalid 0.
+    """
+    names = names or list(CLASS_NAMES)
+    ids = ids or {i: i for i in range(len(CLASS_NAMES))}
+    kx, ky = ("xcenter", "ycenter") if key_style == "plain" else ("x_center", "y_center")
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    rows, n_det, n_empty, dropped = [], 0, 0, 0
+    for stem, dets in boxes.items():
+        fname = (filenames or {}).get(stem, f"{stem}.jpg")
+        w, h = sizes.get(stem, (1, 1))
+        preds = []
+        for x1, y1, x2, y2, conf, cls in sorted(dets, key=lambda r: -r[4]):
+            bw, bh = (x2 - x1) / w, (y2 - y1) / h
+            if bw <= 0 or bh <= 0:
+                dropped += 1
+                continue
+            preds.append({
+                "class": names[ids[cls]],
+                kx: round(((x1 + x2) / 2) / w, 6),
+                ky: round(((y1 + y2) / 2) / h, 6),
+                "width": round(bw, 6),
+                "height": round(bh, 6),
+                "confidence": round(min(max(float(conf), 0.0), 1.0), 6),
+            })
+        n_det += len(preds)
+        n_empty += not preds
+        # Compact separators to match the organizers' example byte-for-byte in shape.
+        rows.append((fname, json.dumps(preds, separators=(",", ":"))))
+
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["ID", "predictions"])
+        w.writerows(rows)
+
+    print(f"  wrote {len(rows)} rows / {n_det} detections to {out}")
+    if n_empty:
+        print(f"    {n_empty} image(s) with no detections written as [] (required, not optional)")
+    if dropped:
+        print(f"    [WARN] dropped {dropped} box(es) with zero width/height — the spec forbids them")
     return out
 
 
@@ -180,7 +250,17 @@ def main() -> int:
     src.add_argument("--preds", help="use an existing directory of YOLO+conf txt files")
     ap.add_argument("--source", default=None, help="images to predict on "
                     "(default: the validation split named by configs/data.prepared.yaml)")
-    ap.add_argument("--format", default="yolo", choices=["yolo", "kaggle", "coco", "csv", "xml"])
+    ap.add_argument("--format", default="ped", choices=["ped", "yolo", "kaggle", "coco", "csv", "xml"],
+                    help="'ped' is the organizers' ID,predictions format and the only one you should "
+                         "upload; the rest are auxiliary exports")
+    ap.add_argument("--test-images", default=None,
+                    help="the test image folder. Guarantees EVERY image gets exactly one row "
+                         "(empty detections become []), which the rules require")
+    ap.add_argument("--keys", default="plain", choices=["plain", "underscore"],
+                    help="JSON key style: 'plain' = xcenter/ycenter (matches the rules' example and "
+                         "the sentence 'xcenter and ycenter represent the center'); "
+                         "'underscore' = x_center/y_center (matches the field list). The rules show "
+                         "BOTH, so this is worth confirming with the organizers — see README")
     ap.add_argument("--out", default=None, help="output file or directory (default: runs/submission_<format>)")
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--conf", type=float, default=0.25, help="use the value eval_map.py --sweep recommended")
@@ -226,10 +306,14 @@ def main() -> int:
             model.overrides["device"] = args.device
         sizes: dict[str, tuple[int, int]] = {}
         boxes: dict[str, list[tuple]] = {}
+        filenames: dict[str, str] = {}
         tiled = bool(args.tile)
         for f in files:
             with Image.open(f) as im:
                 sizes[f.stem] = (im.width, im.height)
+            # The organizers want the EXACT filename in the ID column, so keep it
+            # alongside the stem that every other script is keyed by.
+            filenames[f.stem] = f.name
             if tiled:
                 import subprocess
 
@@ -259,17 +343,62 @@ def main() -> int:
         stems = {p.stem.split("__")[0] for p in pred_dir.glob("*.txt")}
         img_dir = Path(args.source)
         sizes = {}
+        filenames = {}
         for stem in stems:
             for ext in IMG_EXTS:
                 cand = img_dir / f"{stem}{ext}"
                 if cand.is_file():
                     with Image.open(cand) as im:
                         sizes[stem] = (im.width, im.height)
+                    filenames[stem] = cand.name
                     break
             else:
                 sizes[stem] = (1, 1)
                 print(f"  [WARN] no source image for {stem}; assuming 1×1 (normalized output only)")
         boxes = read_boxes(pred_dir, sizes)
+
+    # The rules require EVERY test image to appear exactly once, with [] when nothing was
+    # detected. Driving the file from the prediction set cannot guarantee that: an image
+    # with no detections simply produces no label file. So when the test folder is known,
+    # it decides the rows and the predictions only fill them.
+    if args.test_images:
+        tdir = Path(args.test_images)
+        if not tdir.is_dir():
+            print(f"[ERROR] --test-images {tdir} is not a directory", file=sys.stderr)
+            return 2
+        test_files = sorted(p for p in tdir.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS)
+        if not test_files:
+            print(f"[ERROR] no images under {tdir}", file=sys.stderr)
+            return 2
+        by_stem: dict[str, list[Path]] = {}
+        for p in test_files:
+            by_stem.setdefault(p.stem, []).append(p)
+        collisions = {k: v for k, v in by_stem.items() if len(v) > 1}
+        if collisions:
+            print(f"[ERROR] test images share a stem across extensions, so an ID cannot be "
+                  f"resolved unambiguously: {list(collisions)[:3]}", file=sys.stderr)
+            return 2
+        from PIL import Image as _I
+
+        covered, empty, missing = 0, 0, 0
+        for stem, (p,) in by_stem.items():
+            filenames[stem] = p.name
+            if stem in boxes:
+                covered += 1
+            else:
+                with _I.open(p) as im:
+                    sizes[stem] = (im.width, im.height)
+                boxes[stem] = []
+                empty += 1
+        extra = set(boxes) - set(by_stem)
+        if extra:
+            missing = len(extra)
+            print(f"[ERROR] {missing} prediction(s) do not correspond to any test image: "
+                  f"{sorted(extra)[:3]}", file=sys.stderr)
+            return 2
+        print(f"\n=== test coverage ({tdir}) ===")
+        print(f"  test images: {len(test_files)}   with detections: {covered}   "
+              f"empty (written as []): {empty}")
 
     out = Path(args.out) if args.out else ROOT / "runs" / f"submission_{args.format}"
     n_boxes = sum(len(v) for v in boxes.values())
@@ -282,10 +411,21 @@ def main() -> int:
 
     print(f"\n=== writing submission ({args.format}) ===")
     print(f"  images: {len(boxes)}   boxes: {n_boxes}   conf>={args.conf}")
-    print(f"  class ids : " + ", ".join(f"{i}={n}" for i, n in pairs)
-          + ("   [--class-order hole-first, NOT this repo's training ids]" if args.class_order == "hole-first" else ""))
+    if args.format == "ped":
+        # This format carries the class NAME, so it is immune to the id-order question
+        # entirely -- which is why the id order no longer needs to be got right here.
+        print(f"  classes   : {', '.join(out_names)} (by NAME, so no numeric order can be misread)")
+    else:
+        print(f"  class ids : " + ", ".join(f"{i}={n}" for i, n in pairs)
+              + ("   [--class-order hole-first, NOT this repo's training ids]" if args.class_order == "hole-first" else ""))
     print(f"  coordinates converted back to each image's own pixel size (not the letterboxed {args.imgsz}²)")
-    if args.format == "yolo":
+    if args.format == "ped":
+        target = write_ped(boxes, sizes, out if out.suffix else out / "submission.csv",
+                           out_names, ids, filenames, args.keys)
+        print(f"  ID column : exact test filenames, one row per image")
+        print(f"  JSON keys : {('xcenter/ycenter' if args.keys == 'plain' else 'x_center/y_center')}"
+              f"   [--keys {args.keys}]")
+    elif args.format == "yolo":
         target = write_yolo(boxes, sizes, out, out_names, ids)
         # YOLO's own convention for decoding bare integer ids. Without it the output is
         # unreadable-by-construction and the class order is anyone's guess.
@@ -315,6 +455,9 @@ def main() -> int:
         if wp.is_file():
             print(f"  weights: {wp} ({wp.stat().st_size / 1024 / 1024:.1f} MiB) — check the competition's size cap")
     print(f"\nOUTPUT: {target}")
+    if args.format == "ped":
+        print(f"\nValidate before uploading:  python scripts/validate_submission.py --csv {target}"
+              + (f" --test-images {args.test_images}" if args.test_images else ""))
     print("\nBefore submitting, confirm against the organizers' example:")
     print(f"  · the class order above is what their reader expects ({', '.join(out_names)})")
     print("    — they publish names, not numbers, so this is the one thing worth asking about")

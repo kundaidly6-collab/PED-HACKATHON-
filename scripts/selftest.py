@@ -21,6 +21,7 @@ the deadline. So these are checked against hand-computed answers:
 
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 import threading
@@ -495,6 +496,105 @@ def test_submission_class_mapping() -> None:
                   by_x == {120: "Hole", 420: "Spot"}, f"got {by_x}")
 
 
+# --------------------------------------------------------------- submission file
+
+def test_submission_file_format() -> None:
+    """The organizers' format, and the validator that guards it.
+
+    This file is the only artefact that gets scored, and the rules list a dozen ways to
+    make it invalid -- a missing image row, an unquoted field, a zero-size box, a class
+    name in the wrong case. Every one of them produces a plausible-looking CSV, so the
+    writer and the validator are tested against each other here.
+    """
+    print("\n= submission file: the organizers' ID,predictions format =")
+    import submit
+    import validate_submission as VS
+
+    sizes = {"image001": (600, 400), "image002": (600, 400), "image003": (600, 400)}
+    filenames = {"image001": "image001.jpg", "image002": "image002.jpg", "image003": "image003.jpg"}
+    # image001: a Hole and a Spot.  image002: one Spot.  image003: nothing detected.
+    boxes = {"image001": [(120.0, 170.0, 180.0, 230.0, 0.91234, 1),
+                          (450.0, 200.0, 510.0, 260.0, 0.80000, 0)],
+             "image002": [(300.0, 160.0, 420.0, 280.0, 0.55555, 0)],
+             "image003": []}
+    pairs, ids = submit.class_map("spot-first")
+    names = [n for _i, n in pairs]
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        # a fake test folder so coverage can be checked
+        timgs = td / "test"
+        timgs.mkdir()
+        for fn in filenames.values():
+            (timgs / fn).write_bytes(b"x")
+
+        out = submit.write_ped(boxes, sizes, td / "submission.csv", names, ids, filenames)
+        errors, warnings, st = VS.validate(out, timgs)
+        check("a generated submission passes the validator", not errors, f"errors: {errors[:3]}")
+        check("the validator confirms exact test-set coverage", st.get("coverage") == "exact",
+              f"got {st.get('coverage')}")
+        check("the empty image is a present row of [], not an omission",
+              st["images"] == 3 and st["empty"] == 1, f"got {st['images']} rows, {st['empty']} empty")
+        check("detections are counted per class by NAME",
+              st["per_class"] == {"Hole": 1, "Spot": 2}, f"got {st['per_class']}")
+
+        # shape: header is exactly two columns, and the JSON keys are the spec's
+        raw = out.read_text(encoding="utf-8")
+        rows = list(csv.reader(raw.splitlines()))
+        check("header is exactly [ID, predictions]", rows[0] == ["ID", "predictions"], f"got {rows[0]}")
+        check("every row has exactly two columns", all(len(r) == 2 for r in rows), "a row split")
+        det = json.loads(rows[1][1])[0]
+        check("detection keys are class/xcenter/ycenter/width/height/confidence",
+              sorted(det) == ["class", "confidence", "height", "width", "xcenter", "ycenter"],
+              f"got {sorted(det)}")
+        check("class travels as the NAME, so the numeric id order cannot leak",
+              det["class"] == "Hole", f"got {det['class']!r}")
+        check("coordinates are normalized to 0..1",
+              all(0.0 <= det[k] <= 1.0 for k in ("xcenter", "ycenter", "width", "height")),
+              f"got {det}")
+        check("the empty image row is literally []",
+              rows[3][1] == "[]", f"got {rows[3][1]!r}")
+
+        # the underscore spelling the rules also use
+        out2 = submit.write_ped(boxes, sizes, td / "s2.csv", names, ids, filenames, key_style="underscore")
+        e2, _w2, st2 = VS.validate(out2, timgs, expect_keys="underscore")
+        check("--keys underscore produces x_center/y_center and validates",
+              not e2 and st2["key_styles"] == {"underscore": 3}, f"errors: {e2[:3]}")
+
+        # a box whose normalized width rounds to nothing must not become an invalid 0
+        tiny = {"image001": [(300.0, 200.0, 300.0, 200.0, 0.9, 1)]}   # zero-area
+        out3 = submit.write_ped(tiny, sizes, td / "s3.csv", names, ids, filenames)
+        e3, _w3, st3 = VS.validate(out3, timgs)
+        check("a zero-area box is dropped rather than written as width 0",
+              st3["detections"] == 0 and not any("width" in e for e in e3), f"got {st3['detections']}")
+
+        # and the validator must reject the specific mistakes the rules call out
+        # Built with the csv module, not string concatenation: quoting a JSON field by
+        # hand is exactly the mistake the validator exists to catch, and getting it wrong
+        # in the fixture would test the wrong failure.
+        bad = td / "bad.csv"
+        with bad.open("w", newline="", encoding="utf-8") as fh:
+            wbad = csv.writer(fh)
+            wbad.writerow(["ID", "predictions"])
+            wbad.writerow(["image001.jpg", json.dumps([{"class": "hole", "xcenter": 0.5,
+                                                        "ycenter": 0.5, "width": 0.1,
+                                                        "height": 0.1, "confidence": 0.9}])])
+        e4, _w4, _s4 = VS.validate(bad, timgs)
+        check("a lowercase class name is rejected", any("invalid class" in e for e in e4), f"got {e4[:2]}")
+        check("a missing image row is rejected", any("missing row" in e for e in e4), f"got {e4[:2]}")
+
+        bad2 = td / "bad2.csv"
+        with bad2.open("w", newline="", encoding="utf-8") as fh:
+            wbad = csv.writer(fh)
+            wbad.writerow(["ID", "predictions"])
+            wbad.writerow(["image001.jpg", "[]"])
+            wbad.writerow(["image001.jpg", "[]"])          # the same image twice
+            wbad.writerow(["image002.jpg", "[]"])
+            wbad.writerow(["image003.jpg", "[]"])
+        e5, _w5, _s5 = VS.validate(bad2, timgs)
+        check("a duplicated ID is rejected", any("more than once" in e for e in e5), f"got {e5[:2]}")
+
+
 # --------------------------------------------------------------- roundtrip
 
 def test_roundtrip() -> None:
@@ -685,6 +785,7 @@ def main() -> int:
     test_roundtrip()
     test_annotation_stack()
     test_submission_class_mapping()
+    test_submission_file_format()
     test_end_to_end_build()
     test_dataset_config_resolution()
     test_kaggle_reference_parsing()
